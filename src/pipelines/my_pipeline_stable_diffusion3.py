@@ -231,12 +231,31 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
-                    # --- BEGIN MODIFIED: Annealing guidance ---
+                    # --- BEGIN MODIFIED: Annealing guidance with CFG++ ---
                     if use_annealing_guidance and guidance_scale_model is not None:
+                        orig_dtype = noise_pred_uncond.dtype
                         guidance_scale_pred = guidance_scale_model(
-                            t, guidance_lambda, noise_pred_uncond, noise_pred_text
+                            t, guidance_lambda,
+                            noise_pred_uncond.float(), noise_pred_text.float()
                         )
-                        noise_pred = noise_pred_uncond + guidance_scale_pred * (noise_pred_text - noise_pred_uncond)
+                        v_guided = noise_pred_uncond.float() + guidance_scale_pred * (noise_pred_text.float() - noise_pred_uncond.float())
+
+                        # CFG++ denoising step (flow-matching equivalent):
+                        #   x0_pred  = z_t - sigma_t * v_guided       (guided signal estimate)
+                        #   eps_uncond = z_t + (1-sigma_t) * v_uncond  (unconditional noise)
+                        #   z_{t-1}  = (1-sigma_{t-1}) * x0_pred + sigma_{t-1} * eps_uncond
+                        sigma_t = t.float() / 1000.0
+                        sigma_t1 = timesteps[i + 1].float() / 1000.0 if (i + 1 < len(timesteps)) else 0.0
+
+                        latents_f32 = latents.float()
+                        x0_pred = latents_f32 - sigma_t * v_guided
+                        eps_uncond = latents_f32 + (1.0 - sigma_t) * noise_pred_uncond.float()
+                        latents = ((1.0 - sigma_t1) * x0_pred + sigma_t1 * eps_uncond).to(orig_dtype)
+
+                        # Advance scheduler step index (we bypassed scheduler.step)
+                        if self.scheduler.step_index is None:
+                            self.scheduler._init_step_index(t)
+                        self.scheduler._step_index += 1
                     else:
                         noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
                     # --- END MODIFIED ---
@@ -264,8 +283,9 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                         )
 
                 # compute the previous noisy sample x_t -> x_t-1
+                if not (use_annealing_guidance and guidance_scale_model is not None):
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
                 latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():

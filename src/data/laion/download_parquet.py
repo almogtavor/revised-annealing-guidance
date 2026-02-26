@@ -1,44 +1,66 @@
 from img2dataset import download
 from datasets import load_dataset
+import os
 import pandas as pd
 
-# Load the metadata via streaming (no need to download the entire dataset)
-dataset = load_dataset("laion/laion2B-en-aesthetic", split="train", streaming=True)
 
-# Collect and filter samples
-samples = []
-for example in dataset:
-    if example.get("URL") and example.get("similarity") and example.get("aesthetic"):
-        samples.append({
-            "URL": example["URL"],
-            "TEXT": example.get("TEXT", ""),
-            "similarity": example["similarity"],
-            "aesthetic": example["aesthetic"]
-        })
-    if len(samples) >= 100_000:
-        break
+def main():
+    csv_path = "./src/data/laion/laion_pop_26k.csv"
 
-# Convert to DataFrame
-df = pd.DataFrame(samples)
+    # Only stream+filter if CSV doesn't already exist
+    if not os.path.exists(csv_path):
+        print("=" * 80)
+        print("Loading LAION-POP dataset from HuggingFace...")
+        print("LAION-POP: 600k high-quality images with detailed captions")
+        print("Taking top 26k URLs to get ~20k actual images (accounting for ~78% success rate)")
+        print("=" * 80)
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 
-# Sort by aesthetic score + similarity
-df_sorted = df.sort_values(by=["similarity", "aesthetic"], ascending=False)
+        # Load LAION-POP (600k images)
+        dataset = load_dataset("laion/laion-pop", split="train", token=hf_token)
 
-# Take top 20k
-df_top20k = df_sorted.head(20000)
+        print(f"Loaded {len(dataset):,} total images from LAION-POP")
 
-# Save to CSV
-df_top20k.to_csv("./src/data/laion/laion_top20k.csv", index=False)
+        # Convert to DataFrame for sorting
+        # LAION-POP has columns: URL, TEXT (caption), and quality scores
+        print("Converting to DataFrame...")
+        df = pd.DataFrame(dataset)
+
+        # Take top 20k based on quality scores
+        # Sort by aesthetic/similarity if available, otherwise just take first 20k
+        if 'aesthetic' in df.columns and 'similarity' in df.columns:
+            print("Sorting by quality scores...")
+            df_sorted = df.sort_values(by=["aesthetic", "similarity"], ascending=False)
+        else:
+            print("No quality scores found, using dataset order...")
+            df_sorted = df
+
+        df_top26k = df_sorted.head(26000)
+
+        # Save to CSV
+        print(f"Saving top {len(df_top26k):,} URLs to {csv_path}...")
+        df_top26k.to_csv(csv_path, index=False)
+        print(f"CSV saved successfully! (Targeting 20k actual downloads)")
+    else:
+        print(f"CSV already exists at {csv_path}, skipping metadata download.")
+        df = pd.read_csv(csv_path)
+        print(f"CSV contains {len(df):,} URLs")
+
+    print("=" * 80)
+    print("Downloading images via img2dataset...")
+    print("=" * 80)
+    download(
+        url_list=csv_path,
+        input_format="csv",
+        url_col="url",
+        caption_col="cogvlm_caption",
+        output_format="files",
+        output_folder="./src/data/laion/laion_pop_images",
+        processes_count=8,
+        thread_count=32,
+        resize_mode="no"
+    )
 
 
-download(
-    url_list="./src/data/laion/laion_top20k.csv",
-    input_format="csv",
-    url_col="URL",
-    caption_col="TEXT",
-    output_format="files",
-    output_folder="./src/data/laion/laion_top20k_images",
-    processes_count=4,
-    thread_count=16,
-    resize_mode="no"
-)
+if __name__ == '__main__':
+    main()
