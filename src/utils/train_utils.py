@@ -50,7 +50,7 @@ def get_timestep(pipeline, batch_size=1):
     return timesteps
 
 
-def calc_loss(noise_pred, noise_gt, delta_t_minus_one, l, _ema=[None, None]):
+def calc_loss(noise_pred, noise_gt, delta_t_minus_one, l, _ema=[None, None], ema_normalize=True):
     loss = torch.tensor(0.0, device=noise_pred.device)
     diff_loss = torch.tensor(0.0, device=noise_pred.device)
     eps_loss = torch.tensor(0.0, device=noise_pred.device)
@@ -65,7 +65,16 @@ def calc_loss(noise_pred, noise_gt, delta_t_minus_one, l, _ema=[None, None]):
     diff_loss = (l * squared_errors).mean()
     _ema[0] = eps_loss.item() if _ema[0] is None else 0.999 * _ema[0] + 0.001 * eps_loss.item()
     _ema[1] = diff_loss.item() if _ema[1] is None else 0.999 * _ema[1] + 0.001 * diff_loss.item()
-    ratio = min(_ema[0] / max(_ema[1], 1e-8), 1e4)
+
+    if ema_normalize:
+        # When eps_ema ≈ 0 (e.g. fixed_lambda=1.0), the ratio would zero out diff_loss.
+        # Default to 1.0 so delta-only training still receives gradient.
+        if _ema[0] is not None and _ema[0] > 1e-10:
+            ratio = min(_ema[0] / max(_ema[1], 1e-8), 1e4)
+        else:
+            ratio = 1.0
+    else:
+        ratio = 1.0
     loss += ratio * diff_loss
 
 

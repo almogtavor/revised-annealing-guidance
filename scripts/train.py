@@ -178,7 +178,8 @@ def forward_pass(
         delta_t_minus_one = noise_pred_uncond_prev - noise_pred_text_prev
 
     # calc loss
-    loss = train_utils.calc_loss(noise_pred, noise_gt, delta_t_minus_one, l)
+    ema_normalize = config['training'].get('ema_loss_normalization', True)
+    loss = train_utils.calc_loss(noise_pred, noise_gt, delta_t_minus_one, l, ema_normalize=ema_normalize)
 
     return loss
 
@@ -195,6 +196,9 @@ def forward_pass_sd3(
     dtype = pipeline.transformer.dtype
 
     l = torch.rand(B).to(pipeline.device)
+    fixed_lam = config['training'].get('fixed_lambda')
+    if fixed_lam is not None:
+        l = torch.full_like(l, fixed_lam)
     timestep = train_utils.get_timestep(pipeline, batch_size=B)
     noisy_latents, velocity_gt = train_utils_sd3.to_noisy_latents_sd3(pipeline, images, timestep)
 
@@ -233,7 +237,8 @@ def forward_pass_sd3(
     delta = vt2 - vu2
 
     # Same loss structure as SDXL but with velocity instead of noise
-    loss = train_utils.calc_loss(v_guided, velocity_gt.float(), delta, l)
+    ema_normalize = config['training'].get('ema_loss_normalization', True)
+    loss = train_utils.calc_loss(v_guided, velocity_gt.float(), delta, l, ema_normalize=ema_normalize)
 
     eps_val = ((1 - l) * ((v_guided - velocity_gt.float()) ** 2).mean(dim=[1, 2, 3])).mean()
     diff_val = (l * (delta ** 2).mean(dim=[1, 2, 3])).mean()

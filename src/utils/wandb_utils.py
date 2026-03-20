@@ -85,11 +85,13 @@ def init_training(config, guidance_model=None, n_samples=None):
     parts.append(model_short)
     run_name = "_".join(parts)
 
+    tags = config.get("tags", [])
     _run = wandb.init(
         entity="annealing-guidance",
         project="annealing-guidance",
         job_type="train",
         name=run_name,
+        tags=tags,
         settings=wandb.Settings(start_method="thread"),
         config={
             "model_id": config["diffusion"]["model_id"],
