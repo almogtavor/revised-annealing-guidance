@@ -287,7 +287,7 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
 def generate_image(pipeline, guidance_scale_model, prompt, lambda_val, seed, device,
                     cached_embeds=None):
     """Generate a single image."""
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.Generator(device="cuda:0").manual_seed(seed)
 
     kwargs = dict(
         guidance_scale=GUIDANCE_SCALE,
@@ -311,7 +311,7 @@ def generate_image(pipeline, guidance_scale_model, prompt, lambda_val, seed, dev
 def generate_baseline(pipeline, prompt, seed, device, guidance_scale,
                       use_cfgpp=False, cached_embeds=None):
     """Generate a single image using standard CFG or CFG++ with a fixed guidance scale."""
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.Generator(device="cuda:0").manual_seed(seed)
 
     kwargs = dict(
         guidance_scale=guidance_scale,

@@ -1,0 +1,48 @@
+seed: 42
+tags: ["sanity check", "delta only"]
+
+diffusion:
+  model_id: stabilityai/stable-diffusion-3-medium-diffusers
+  num_timesteps: 50
+  vanilla_cfg: 1
+  scheduler_kwargs:
+    beta_start: 0.00085
+    beta_end: 0.012
+    beta_schedule: scaled_linear
+    clip_sample: false
+    set_alpha_to_one: true
+    pred_sample_direction_with_null: true
+
+guidance_scale_model:
+  type: scalar_mlp
+  hidden_size: 128
+  output_size: 1
+  n_layers: 3
+  noise_metric: norm
+  lambda_embed_dim: 4
+  delta_embed_dim: 4
+  t_embed_dim: 4
+  t_embed_normalization: 1000
+  delta_embed_normalization: 5.0
+  w_scale: 1
+  w_bias: 1
+
+training:
+  fixed_lambda: 1.0  # lambda=1 => only delta loss => w should explode
+  save_interval: 200
+  max_steps: 5000
+  batch_size: 1
+  accumulation_steps: 16
+  out_dir: ./output/sanity_delta_only_v2
+  image_root: src/data/laion/laion_pop_images/
+  optimizer_kwargs:
+    weight_decay: 0.01
+    lr: 0.001
+
+  prompt_noise:
+    add_noise: true
+    noise_scale: 0.025
+    rescale: true
+    psi: 1
+    t1: 0
+    t2: 1

@@ -1,0 +1,600 @@
+"""Evaluate FID, CLIP score, and ImageReward on COCO 2017 val (5k images).
+
+Replicates Tables 1-2 from the TIGER paper (arXiv:2506.24108).
+
+Baselines (CFG, CFG++, APG) are generated once and cached in
+  results/baseline_cache/
+so subsequent runs (with different annealing checkpoints) skip them.
+
+Usage:
+  python scripts/eval_metrics.py \
+      --checkpoint output/checkpoints_.../checkpoint_step_XXXXX.pt \
+      --output_dir results/images/$SLURM_JOB_ID \
+      [--label my_run_name] \
+      [--skip_baselines]       # only generate annealing images
+"""
+import os
+import sys
+import json
+import csv
+import argparse
+import hashlib
+from pathlib import Path
+from typing import Optional
+
+import torch
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# ---------------------------------------------------------------------------
+# Constants matching the paper
+# ---------------------------------------------------------------------------
+NUM_IMAGES = 5000
+NUM_INFERENCE_STEPS = 28
+SEED_OFFSET = 0  # seed = image_id (from COCO)
+
+# Baselines: (dir_name, method, guidance_scale, use_cfgpp, use_apg)
+BASELINE_CONFIGS = [
+    ("cfg_w7.5",   "CFG",   7.5,  False, False),
+    ("cfg_w10",    "CFG",   10.0, False, False),
+    ("cfg_w12.5",  "CFG",   12.5, False, False),
+    ("cfg_w15",    "CFG",   15.0, False, False),
+    ("cfgpp_w0.6", "CFG++", 0.6,  True,  False),
+    ("cfgpp_w0.8", "CFG++", 0.8,  True,  False),
+    ("cfgpp_w1.0", "CFG++", 1.0,  True,  False),
+    ("cfgpp_w1.2", "CFG++", 1.2,  True,  False),
+    ("apg_w10",    "APG",   10.0, False, True),
+    ("apg_w15",    "APG",   15.0, False, True),
+    ("apg_w17.5",  "APG",   17.5, False, True),
+    ("apg_w20",    "APG",   20.0, False, True),
+]
+
+# Annealing lambda values to evaluate
+ANNEALING_LAMBDAS = [0.05, 0.4, 0.7, 0.8]
+ANNEALING_GUIDANCE_SCALE = 7.0
+
+BASELINE_CACHE_DIR = os.path.join(_REPO_ROOT, "results", "baseline_cache")
+
+# ---------------------------------------------------------------------------
+# COCO 2017 val helpers
+# ---------------------------------------------------------------------------
+COCO_ANNOTATIONS_URL = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+COCO_VAL_IMAGES_URL = "http://images.cocodataset.org/zips/val2017.zip"
+
+
+def get_coco_prompts(coco_dir: str):
+    """Load first caption per image from COCO 2017 val, return list of (image_id, caption)."""
+    import json as _json
+    ann_file = os.path.join(coco_dir, "annotations", "captions_val2017.json")
+    if not os.path.exists(ann_file):
+        raise FileNotFoundError(
+            f"COCO annotations not found at {ann_file}. "
+            f"Download from {COCO_ANNOTATIONS_URL} and extract to {coco_dir}/"
+        )
+    with open(ann_file) as f:
+        data = _json.load(f)
+
+    # Group captions by image_id, take the first one
+    from collections import defaultdict
+    caps_by_img = defaultdict(list)
+    for ann in data["annotations"]:
+        caps_by_img[ann["image_id"]].append(ann["caption"])
+
+    # Sort by image_id for determinism
+    image_ids = sorted(caps_by_img.keys())
+    prompts = [(img_id, caps_by_img[img_id][0]) for img_id in image_ids]
+    return prompts[:NUM_IMAGES]
+
+
+# ---------------------------------------------------------------------------
+# APG (Adaptive Projected Guidance) — Sadat et al.
+# ---------------------------------------------------------------------------
+def apg_guidance(noise_pred_uncond, noise_pred_text, guidance_scale):
+    """APG: project delta onto perpendicular component relative to uncond."""
+    delta = noise_pred_text - noise_pred_uncond
+    # Flatten for dot product
+    B = delta.shape[0]
+    delta_flat = delta.view(B, -1)
+    uncond_flat = noise_pred_uncond.view(B, -1)
+
+    # Parallel component: proj of delta onto uncond direction
+    dot = (delta_flat * uncond_flat).sum(dim=-1, keepdim=True)
+    norm_sq = (uncond_flat * uncond_flat).sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    parallel = (dot / norm_sq) * uncond_flat
+
+    # Perpendicular component
+    perp = delta_flat - parallel
+    perp = perp.view_as(delta)
+
+    return noise_pred_uncond + guidance_scale * perp
+
+
+# ---------------------------------------------------------------------------
+# Image generation
+# ---------------------------------------------------------------------------
+def load_pipeline(device, dtype):
+    from src.pipelines.my_pipeline_stable_diffusion3 import MyStableDiffusion3Pipeline
+    hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+    pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+        "stabilityai/stable-diffusion-3-medium-diffusers",
+        torch_dtype=dtype,
+        token=hf_token,
+    )
+    pipeline.to(device)
+    pipeline.set_progress_bar_config(disable=True)
+    if hasattr(pipeline, "enable_attention_slicing"):
+        pipeline.enable_attention_slicing()
+    return pipeline
+
+
+def load_guidance_model(checkpoint_path, device):
+    from src.model.guidance_scale_model import ScalarMLP
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model_cfg = checkpoint.get('model_config') \
+        or checkpoint.get('config', {}).get('guidance_scale_model', {})
+    state_dict = checkpoint.get('model_state_dict') \
+        or checkpoint.get('guidance_scale_model')
+    model = ScalarMLP(
+        hidden_size=model_cfg.get('hidden_size', 128),
+        output_size=model_cfg.get('output_size', 1),
+        n_layers=model_cfg.get('n_layers', 2),
+        t_embed_dim=model_cfg.get('t_embed_dim', 4),
+        delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
+        lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
+        t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
+        delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
+        w_bias=model_cfg.get('w_bias', 1.0),
+        w_scale=model_cfg.get('w_scale', 1.0),
+    ).to(device, dtype=torch.float32)
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+    return model
+
+
+def generate_single(pipeline, prompt, seed, device, guidance_scale,
+                    use_cfgpp=False, use_apg=False,
+                    guidance_scale_model=None, guidance_lambda=None):
+    """Generate a single image. Supports CFG, CFG++, APG, and Annealing."""
+    generator = torch.Generator(device="cuda:0").manual_seed(seed)
+
+    use_annealing = guidance_scale_model is not None and guidance_lambda is not None
+
+    if use_apg:
+        # APG needs a custom hook — we monkey-patch the pipeline for this call
+        # For now, use standard CFG and post-process with APG projection
+        # Actually, APG modifies the guidance step. We need to hook into the pipeline.
+        # The cleanest approach: generate with use_cfgpp=False, but intercept guidance.
+        # Since our pipeline doesn't support APG natively, we implement it via
+        # a temporary forward hook on the guidance step.
+        return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator)
+
+    kwargs = dict(
+        guidance_scale=guidance_scale,
+        num_inference_steps=NUM_INFERENCE_STEPS,
+        generator=generator,
+        prompt=prompt,
+        use_annealing_guidance=use_annealing,
+        use_cfgpp=use_cfgpp,
+    )
+    if use_annealing:
+        kwargs["guidance_scale_model"] = guidance_scale_model
+        kwargs["guidance_lambda"] = guidance_lambda
+
+    return pipeline(**kwargs).images[0]
+
+
+def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
+    """Generate with APG by temporarily patching the pipeline's guidance step."""
+    # We use standard pipeline but override the guidance combination.
+    # The trick: set guidance_scale=1.0 (disable built-in CFG) and manually
+    # combine in a callback. But SD3 pipeline doesn't support per-step callbacks
+    # for guidance easily. Instead, we'll do a simpler approach:
+    #
+    # Run the pipeline with do_classifier_free_guidance=True but intercept
+    # the noise_pred combination. We achieve this by temporarily monkey-patching
+    # the transformer's forward to capture uncond/cond, then apply APG.
+
+    # Simpler approach: use the pipeline normally but with a hook that replaces
+    # the guidance combination.
+    import types
+
+    original_call = pipeline.__class__.__call__
+
+    # We need to modify the denoising loop. Since our pipeline already has
+    # the guidance logic in __call__, let's patch it at the guidance step.
+    # Looking at the pipeline code, after noise_pred_uncond, noise_pred_text = noise_pred.chunk(2),
+    # it does: noise_pred = uncond + scale * (text - uncond)
+    # For APG we want: noise_pred = uncond + scale * perp_component(text - uncond, uncond)
+
+    _apg_scale = guidance_scale
+
+    # Patch: intercept the point where guidance is applied
+    # We'll use a hook on the transformer that captures the split predictions
+    # Actually, the simplest way: just call with standard CFG and accept the difference.
+    # But that defeats the purpose. Let me use a proper approach.
+
+    # The pipeline's __call__ has this block:
+    #   noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+    # For APG we replace this with the perpendicular projection.
+    # We can temporarily replace self._guidance_scale and add a post-processing hook.
+
+    # Actually, looking at the pipeline code more carefully:
+    # Line 256: noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+    # This is only reached when _use_cfgpp_step is False (standard CFG path).
+    # So for APG, we go through the standard CFG path but we need to modify the combination.
+
+    # Cleanest approach: temporarily monkey-patch the guidance combination
+    # by wrapping the transformer forward to apply APG post-guidance.
+
+    # Let's just directly modify noise_pred after the standard CFG computation.
+    # We'll do this by using a step callback.
+
+    # Unfortunately SD3 pipeline callback_on_step_end happens after the scheduler step,
+    # so we can't intercept guidance there. Let's just patch the transformer.
+
+    # SIMPLEST: run the denoising loop manually, matching the pipeline's logic.
+    # This is what the paper likely did too.
+
+    from src.pipelines.my_pipeline_stable_diffusion3 import MyStableDiffusion3Pipeline
+
+    # Encode prompt
+    (
+        prompt_embeds,
+        negative_prompt_embeds,
+        pooled_prompt_embeds,
+        negative_pooled_prompt_embeds,
+    ) = pipeline.encode_prompt(
+        prompt=prompt,
+        prompt_2=None,
+        prompt_3=None,
+        do_classifier_free_guidance=True,
+    )
+
+    # Prepare timesteps
+    pipeline.scheduler.set_timesteps(NUM_INFERENCE_STEPS, device=device)
+    timesteps = pipeline.scheduler.timesteps
+
+    # Prepare latents
+    num_channels_latents = pipeline.transformer.config.in_channels
+    shape = (1, num_channels_latents,
+             pipeline.default_sample_size, pipeline.default_sample_size)
+    latents = torch.randn(shape, generator=generator, device=device,
+                          dtype=pipeline.transformer.dtype)
+    # Flow-matching schedulers (SD3) don't use init_noise_sigma
+    if hasattr(pipeline.scheduler, 'init_noise_sigma'):
+        latents = latents * pipeline.scheduler.init_noise_sigma
+
+    # Denoising loop with APG
+    for i, t in enumerate(timesteps):
+        latent_model_input = torch.cat([latents] * 2)
+        timestep = t.expand(latent_model_input.shape[0])
+
+        noise_pred = pipeline.transformer(
+            hidden_states=latent_model_input,
+            timestep=timestep,
+            encoder_hidden_states=torch.cat([negative_prompt_embeds, prompt_embeds]),
+            pooled_projections=torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds]),
+            return_dict=False,
+        )[0]
+
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+        # APG: perpendicular guidance
+        noise_pred = apg_guidance(noise_pred_uncond, noise_pred_text, guidance_scale)
+
+        latents = pipeline.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+    # Decode
+    latents = (latents / pipeline.vae.config.scaling_factor) + pipeline.vae.config.shift_factor
+    image = pipeline.vae.decode(latents, return_dict=False)[0]
+    image = pipeline.image_processor.postprocess(image, output_type="pil")[0]
+    return image
+
+
+def generate_images_for_config(pipeline, prompts, save_dir, device,
+                               guidance_scale, use_cfgpp=False, use_apg=False,
+                               guidance_scale_model=None, guidance_lambda=None,
+                               rank=0, world_size=1):
+    """Generate images for all prompts, saving to save_dir/. Skip existing."""
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Shard work across GPUs
+    my_prompts = [(i, p) for i, p in enumerate(prompts) if i % world_size == rank]
+
+    for idx, (image_id, caption) in tqdm(my_prompts, desc=os.path.basename(save_dir),
+                                          disable=(rank != 0)):
+        img_path = os.path.join(save_dir, f"{image_id:012d}.png")
+        if os.path.exists(img_path):
+            continue
+        img = generate_single(
+            pipeline, caption, image_id + SEED_OFFSET, device,
+            guidance_scale, use_cfgpp=use_cfgpp, use_apg=use_apg,
+            guidance_scale_model=guidance_scale_model, guidance_lambda=guidance_lambda,
+        )
+        img.save(img_path)
+
+
+# ---------------------------------------------------------------------------
+# Metrics computation
+# ---------------------------------------------------------------------------
+def compute_fid(gen_dir, ref_dir):
+    """Compute FID between generated images and COCO val2017 reference."""
+    try:
+        from cleanfid import fid as cleanfid
+        score = cleanfid.compute_fid(gen_dir, ref_dir)
+        return score
+    except ImportError:
+        # Fallback: use torch-fidelity or pytorch-fid
+        try:
+            from pytorch_fid.fid_score import calculate_fid_given_paths
+            score = calculate_fid_given_paths(
+                [gen_dir, ref_dir], batch_size=64, device="cuda",
+                dims=2048, num_workers=4)
+            return score
+        except ImportError:
+            print("WARNING: Neither clean-fid nor pytorch-fid installed. "
+                  "Install with: pip install clean-fid")
+            return float('nan')
+
+
+def compute_clip_score(gen_dir, prompts):
+    """Compute mean CLIP similarity between generated images and their prompts."""
+    try:
+        import clip
+    except ImportError:
+        try:
+            import open_clip as clip
+        except ImportError:
+            print("WARNING: CLIP not installed. Install with: pip install openai-clip")
+            return float('nan')
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Try openai CLIP first
+    try:
+        model, preprocess = clip.load("ViT-L/14", device=device)
+        tokenize = clip.tokenize
+    except (AttributeError, Exception):
+        # open_clip interface
+        model, _, preprocess = clip.create_model_and_transforms(
+            'ViT-L-14', pretrained='openai')
+        model = model.to(device)
+        tokenize = clip.get_tokenizer('ViT-L-14')
+
+    scores = []
+    for image_id, caption in tqdm(prompts, desc="CLIP score"):
+        img_path = os.path.join(gen_dir, f"{image_id:012d}.png")
+        if not os.path.exists(img_path):
+            continue
+        image = preprocess(Image.open(img_path)).unsqueeze(0).to(device)
+        text = tokenize([caption]).to(device) if callable(tokenize) else tokenize([caption]).to(device)
+
+        with torch.no_grad():
+            image_features = model.encode_image(image)
+            text_features = model.encode_text(text)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            sim = (image_features * text_features).sum(dim=-1).item()
+        scores.append(sim)
+
+    return np.mean(scores) if scores else float('nan')
+
+
+def compute_image_reward(gen_dir, prompts):
+    """Compute mean ImageReward score."""
+    try:
+        import ImageReward as IR
+        model = IR.load("ImageReward-v1.0")
+    except ImportError:
+        print("WARNING: ImageReward not installed. Install with: pip install image-reward")
+        return float('nan')
+
+    scores = []
+    for image_id, caption in tqdm(prompts, desc="ImageReward"):
+        img_path = os.path.join(gen_dir, f"{image_id:012d}.png")
+        if not os.path.exists(img_path):
+            continue
+        score = model.score(caption, img_path)
+        scores.append(score)
+
+    return np.mean(scores) if scores else float('nan')
+
+
+# ---------------------------------------------------------------------------
+# Multi-GPU helpers
+# ---------------------------------------------------------------------------
+def get_rank_info():
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", local_rank))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    return rank, world_size, local_rank
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate FID/CLIP/ImageReward (COCO 5k)")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to annealing guidance checkpoint")
+    parser.add_argument("--output_dir", type=str, required=True,
+                        help="Directory to save results (e.g. results/images/$SLURM_JOB_ID)")
+    parser.add_argument("--coco_dir", type=str,
+                        default=os.path.join(_REPO_ROOT, "data", "coco2017"),
+                        help="Path to COCO 2017 dataset")
+    parser.add_argument("--label", type=str, default=None,
+                        help="Label for this run (used in CSV output)")
+    parser.add_argument("--skip_baselines", action="store_true",
+                        help="Skip baseline generation (assume cached)")
+    parser.add_argument("--skip_generation", action="store_true",
+                        help="Skip all generation (only compute metrics)")
+    parser.add_argument("--skip_metrics", action="store_true",
+                        help="Skip metrics computation (only generate images)")
+    parser.add_argument("--baseline_indices", type=int, nargs="+", default=None,
+                        help="Indices into BASELINE_CONFIGS to generate (0-based). "
+                             "If not set, generate all. Use to split work across jobs.")
+    parser.add_argument("--annealing_lambdas", type=float, nargs="+",
+                        default=ANNEALING_LAMBDAS,
+                        help="Lambda values to evaluate")
+    args = parser.parse_args()
+
+    rank, world_size, local_rank = get_rank_info()
+    torch.cuda.set_device(local_rank)
+    device = f"cuda:{local_rank}"
+    dtype = torch.float16
+
+    if rank != 0:
+        import builtins
+        builtins.print = lambda *a, **kw: None
+
+    print(f"[GPU {world_size}x] Device: {device} — {torch.cuda.get_device_name(local_rank)}")
+
+    # --- Load COCO prompts ---
+    prompts = get_coco_prompts(args.coco_dir)
+    print(f"Loaded {len(prompts)} COCO prompts")
+
+    coco_val_dir = os.path.join(args.coco_dir, "val2017")
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(BASELINE_CACHE_DIR, exist_ok=True)
+
+    # Resolve which baselines this job handles
+    if args.baseline_indices is not None:
+        my_baselines = [BASELINE_CONFIGS[i] for i in args.baseline_indices
+                        if i < len(BASELINE_CONFIGS)]
+        print(f"Baseline subset: indices {args.baseline_indices} → "
+              f"{[b[0] for b in my_baselines]}")
+    else:
+        my_baselines = list(BASELINE_CONFIGS)
+
+    if not args.skip_generation:
+        # --- Load pipeline ---
+        pipeline = load_pipeline(device, dtype)
+
+        # --- Generate baselines (cached) ---
+        if not args.skip_baselines:
+            print("\n=== Generating baselines (cached) ===")
+            for dir_name, method, w, use_cfgpp, use_apg in my_baselines:
+                save_dir = os.path.join(BASELINE_CACHE_DIR, dir_name)
+                n_existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')]) \
+                    if os.path.exists(save_dir) else 0
+                if n_existing >= NUM_IMAGES:
+                    print(f"  {dir_name}: {n_existing} images cached, skipping")
+                    continue
+                print(f"  {dir_name}: generating ({n_existing}/{NUM_IMAGES} cached)...")
+                generate_images_for_config(
+                    pipeline, prompts, save_dir, device,
+                    guidance_scale=w, use_cfgpp=use_cfgpp, use_apg=use_apg,
+                    rank=rank, world_size=world_size,
+                )
+
+        # --- Generate annealing images ---
+        if args.checkpoint:
+            guidance_model = load_guidance_model(args.checkpoint, device)
+            print(f"\n=== Generating annealing images ===")
+            for lam in args.annealing_lambdas:
+                dir_name = f"annealing_lambda{lam:.2f}"
+                save_dir = os.path.join(args.output_dir, dir_name)
+                n_existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')]) \
+                    if os.path.exists(save_dir) else 0
+                if n_existing >= NUM_IMAGES:
+                    print(f"  λ={lam}: {n_existing} images exist, skipping")
+                    continue
+                print(f"  λ={lam}: generating ({n_existing}/{NUM_IMAGES} cached)...")
+                generate_images_for_config(
+                    pipeline, prompts, save_dir, device,
+                    guidance_scale=ANNEALING_GUIDANCE_SCALE,
+                    guidance_scale_model=guidance_model, guidance_lambda=lam,
+                    rank=rank, world_size=world_size,
+                )
+
+        # Synchronize GPUs before metrics
+        if world_size > 1:
+            torch.distributed.init_process_group(backend="nccl")
+            torch.distributed.barrier()
+
+        # Free pipeline memory before metrics
+        del pipeline
+        torch.cuda.empty_cache()
+
+    # --- Compute metrics (rank 0 only) ---
+    if rank == 0 and not args.skip_metrics:
+        print("\n=== Computing metrics ===")
+        results = []
+
+        # Baselines (only compute metrics for configs this job handled)
+        for dir_name, method, w, use_cfgpp, use_apg in my_baselines:
+            gen_dir = os.path.join(BASELINE_CACHE_DIR, dir_name)
+            if not os.path.exists(gen_dir):
+                print(f"  {dir_name}: no images found, skipping")
+                continue
+            print(f"\n  Computing metrics for {dir_name}...")
+            fid = compute_fid(gen_dir, coco_val_dir)
+            clip_score = compute_clip_score(gen_dir, prompts)
+            img_reward = compute_image_reward(gen_dir, prompts)
+            results.append({
+                "method": method,
+                "config": dir_name,
+                "guidance_scale": w,
+                "lambda": "",
+                "FID": f"{fid:.2f}",
+                "CLIP": f"{clip_score:.4f}",
+                "ImageReward": f"{img_reward:.4f}",
+            })
+            print(f"    FID={fid:.2f}  CLIP={clip_score:.4f}  ImageReward={img_reward:.4f}")
+
+        # Annealing
+        if args.checkpoint:
+            for lam in args.annealing_lambdas:
+                dir_name = f"annealing_lambda{lam:.2f}"
+                gen_dir = os.path.join(args.output_dir, dir_name)
+                if not os.path.exists(gen_dir):
+                    print(f"  {dir_name}: no images found, skipping")
+                    continue
+                print(f"\n  Computing metrics for annealing λ={lam}...")
+                fid = compute_fid(gen_dir, coco_val_dir)
+                clip_score = compute_clip_score(gen_dir, prompts)
+                img_reward = compute_image_reward(gen_dir, prompts)
+                label = args.label or os.path.basename(args.checkpoint)
+                results.append({
+                    "method": f"Annealing ({label})",
+                    "config": dir_name,
+                    "guidance_scale": ANNEALING_GUIDANCE_SCALE,
+                    "lambda": lam,
+                    "FID": f"{fid:.2f}",
+                    "CLIP": f"{clip_score:.4f}",
+                    "ImageReward": f"{img_reward:.4f}",
+                })
+                print(f"    FID={fid:.2f}  CLIP={clip_score:.4f}  ImageReward={img_reward:.4f}")
+
+        # --- Save CSV ---
+        csv_path = os.path.join(args.output_dir, "metrics_table.csv")
+        os.makedirs(args.output_dir, exist_ok=True)
+        if results:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            print(f"\n=== Results saved to {csv_path} ===")
+
+            # Also print as formatted table
+            print("\n" + "=" * 80)
+            print(f"{'Method':<20} {'Config':<20} {'w':>5} {'λ':>5} {'FID':>8} {'CLIP':>8} {'ImgRew':>10}")
+            print("-" * 80)
+            for r in results:
+                print(f"{r['method']:<20} {r['config']:<20} {r['guidance_scale']:>5} "
+                      f"{str(r['lambda']):>5} {r['FID']:>8} {r['CLIP']:>8} {r['ImageReward']:>10}")
+            print("=" * 80)
+
+        # Save as JSON too
+        json_path = os.path.join(args.output_dir, "metrics_table.json")
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()
