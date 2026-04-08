@@ -1,7 +1,7 @@
 seed: 42
 diffusion:
   model_id: stabilityai/stable-diffusion-3-medium-diffusers
-  num_timesteps: 50
+  num_timesteps: 10
   vanilla_cfg: 0
   scheduler_kwargs:
     beta_start: 0.00085
@@ -26,7 +26,7 @@ guidance_scale_model:
   w_bias: 1
 
 training:
-  label: ema_no_dnorm
+  label: ema_no_dnorm_steps10
   save_interval: 200
   max_steps: 20000
   batch_size: 1
@@ -39,7 +39,7 @@ training:
     lr: 0.001
 
   prompt_noise:
-    add_noise: true # Whether to add noise to prompt embeddings during training
+    add_noise: true
     noise_scale: 0.025
     rescale: true
     psi: 1

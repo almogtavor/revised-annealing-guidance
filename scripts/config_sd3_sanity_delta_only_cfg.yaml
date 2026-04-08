@@ -30,11 +30,12 @@ guidance_scale_model:
 training:
   fixed_lambda: 1.0  # lambda=1 => only delta loss => w should explode
   save_interval: 200
-  max_steps: 5000
+  max_steps: 10000
   batch_size: 1
   accumulation_steps: 16
-  out_dir: ./output/sanity_delta_only_v2
+  out_dir: ./output/sanity_delta_only_cfg_v2
   image_root: src/data/laion/laion_pop_images/
+  resume_from: output/sanity_delta_only_cfg_v2/checkpoints_20260326_232247/checkpoint_step_9000.pt
   optimizer_kwargs:
     weight_decay: 0.01
     lr: 0.001

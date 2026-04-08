@@ -22,6 +22,7 @@ def load_model(ckpt_path, device="cpu"):
         delta_embed_dim=cfg.get("delta_embed_dim", 4),
         lambda_embed_dim=cfg.get("lambda_embed_dim", 4),
         t_embed_normalization=cfg.get("t_embed_normalization", 1e3),
+        num_timesteps=cfg.get("num_timesteps"),
         delta_embed_normalization=cfg.get("delta_embed_normalization", 5.0),
         w_bias=cfg.get("w_bias", 1.0),
         w_scale=cfg.get("w_scale", 1.0),
@@ -105,6 +106,7 @@ def main():
     out = args.output or os.path.join(_REPO_ROOT, "results", "w_scale_analysis.png")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.splitext(out)[0] + ".pdf", bbox_inches="tight")
     print(f"Saved: {out}")
 
 

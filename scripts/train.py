@@ -23,7 +23,7 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
     if forward_fn is None:
         forward_fn = forward_pass
     train_config = config['training']
-    max_steps = train_config['max_steps']
+    max_steps = min(train_config['max_steps'], len(dataloader))
     max_epochs = math.ceil(max_steps / len(dataloader))
     accumulation_steps = max(train_config.get('accumulation_steps', 1), 1)
     grad_clip = train_config.get('grad_clip', 1.0)
@@ -35,6 +35,8 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
     datetime_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
     for epoch in range(max_epochs):
+        if hasattr(dataloader, 'distributed_sampler'):
+            dataloader.distributed_sampler.set_epoch(epoch)
         epoch_start = time.time()
         for batch in tqdm.tqdm(dataloader, miniters=100, mininterval=60):
             model.train()
@@ -217,17 +219,21 @@ def forward_pass_sd3(
     w = model(timestep.float(), l, vu, vt)
     v_guided = vu + w * (vt - vu)
 
-    # CFG++ step (flow matching)
+    use_vanilla_cfg = bool(config['diffusion'].get('vanilla_cfg', 0))
+    # Explicit flow-matching step (differentiable through w for both CFG variants).
     n_steps = config['diffusion'].get('num_timesteps', 50)
     st = (timestep.float() / 1000.0).to(device=noisy_latents.device)
     st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
     st_, st1_ = st.view(-1, 1, 1, 1), st1.view(-1, 1, 1, 1)
     zf = noisy_latents.float()
     x0 = zf - st_ * v_guided
-    eps_u = zf + (1.0 - st_) * vu
+    eps_u = zf + (1.0 - st_) * (v_guided if use_vanilla_cfg else vu)
     z_next = (1.0 - st1_) * x0 + st1_ * eps_u
 
     # Pass 2: direct delta loss (full backprop through frozen transformer)
+    n_steps = config['diffusion'].get('num_timesteps', 50)
+    st = (timestep.float() / 1000.0).to(device=noisy_latents.device)
+    st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
     t_next = (st1 * 1000.0).to(dtype=timestep.dtype, device=timestep.device)
     del x0, eps_u, zf
     torch.cuda.empty_cache()

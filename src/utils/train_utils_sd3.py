@@ -97,8 +97,9 @@ def run_auto_sample(config):
         return
     latest = os.path.abspath(pts[-1])
     lr = config.get('training', {}).get('optimizer_kwargs', {}).get('lr')
+    label = config.get('training', {}).get('label')
     if lr is not None:
-        ckpt_id = f"sd3_lr{lr}"
+        ckpt_id = f"sd3_{lr}_{label}" if label else f"sd3_lr{lr}"
     else:
         ckpt_id = os.path.basename(os.path.dirname(latest))
     script = os.path.join(repo, "submit_sd3_sample.sh")

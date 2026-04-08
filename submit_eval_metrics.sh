@@ -154,6 +154,7 @@ if [[ ! -x "$TORCHRUN" ]]; then
 fi
 
 BASELINE_INDICES="${EVAL_BASELINE_INDICES:-}"
+SKIP_BASELINES="${EVAL_SKIP_BASELINES:-}"
 
 EXTRA_ARGS=""
 if [[ -n "$CKPT" ]]; then
@@ -164,6 +165,9 @@ if [[ -n "$LABEL" ]]; then
 fi
 if [[ -n "$BASELINE_INDICES" ]]; then
     EXTRA_ARGS="$EXTRA_ARGS --baseline_indices $BASELINE_INDICES"
+fi
+if [[ -n "$SKIP_BASELINES" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --skip_baselines"
 fi
 
 echo "=== Starting FID/CLIP/ImageReward evaluation ==="

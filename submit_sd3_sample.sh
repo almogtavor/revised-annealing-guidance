@@ -158,7 +158,7 @@ PY
 
 CKPT="${SD3_SAMPLE_CHECKPOINT:-}"
 CKPT_ID="${SD3_SAMPLE_CHECKPOINT_ID:-}"
-OUTPUT_ROOT="${SD3_SAMPLE_OUTPUT_ROOT:-results/images}/${SLURM_JOB_ID}_${CKPT_ID:-unknown}"
+OUTPUT_ROOT="${SD3_SAMPLE_OUTPUT_ROOT:-results/final}/${SLURM_JOB_ID}_${CKPT_ID:-unknown}"
 
 TORCHRUN="$ENV_DIR/bin/torchrun"
 if [[ ! -x "$TORCHRUN" ]]; then
@@ -170,7 +170,8 @@ if [[ -n "$CKPT" && -n "$CKPT_ID" ]]; then
         scripts/batch_sample_sd3.py \
         --checkpoint "$CKPT" --checkpoint_id "$CKPT_ID" \
         --output_root "$OUTPUT_ROOT" \
-        --baselines --force "$@"
+        --baselines --force \
+        "$@"
 
     # Generate analysis plots (single GPU, fast)
     W_PLOT_DIR="$OUTPUT_ROOT/$CKPT_ID"
@@ -187,6 +188,12 @@ if [[ -n "$CKPT" && -n "$CKPT_ID" ]]; then
         --output "$W_PLOT_DIR/w_heatmap.png" \
         --lr_label "$CKPT_ID" \
         --lambdas 0.0 0.4 0.6 0.8 1.0
+
+    echo "Generating interpretability plots..."
+    "$PY" -u scripts/plot_interpretability.py \
+        --checkpoint "$CKPT" \
+        --output_dir "$W_PLOT_DIR" \
+        --lr_label "$CKPT_ID"
 
     # --- Fig2 comparison (woman in black dress + two dogs) ---
     echo "Generating fig2 comparison..."

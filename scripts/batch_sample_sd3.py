@@ -3,6 +3,8 @@ import os
 import sys
 import json
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 import datetime
 
@@ -91,7 +93,7 @@ PROMPTS_BY_FIGURE = {
 
 LAMBDA_VALUES = [0.0, 0.05, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0]
 SEED = 1000
-NUM_INFERENCE_STEPS = 28
+NUM_INFERENCE_STEPS = 50  # default; overridable via --num_steps
 GUIDANCE_SCALE = 7.0
 
 
@@ -122,6 +124,13 @@ def slugify(text, max_len=40):
     return text[:max_len].strip('_')
 
 
+def _save_with_pdf(img, save_path):
+    """Save a PIL image as .png and .pdf."""
+    img.save(save_path)
+    pdf_path = os.path.splitext(save_path)[0] + '.pdf'
+    img.convert('RGB').save(pdf_path)
+
+
 def create_grid(images, labels, save_path):
     """Create a grid of images with labels."""
     if not images:
@@ -149,7 +158,7 @@ def create_grid(images, labels, save_path):
         grid.paste(img, (x, 0))
         draw.text((x + 5, img_h + 5), label, fill='black', font=font)
 
-    grid.save(save_path)
+    _save_with_pdf(grid, save_path)
     return grid
 
 
@@ -222,13 +231,44 @@ def create_figure_summary(fig_dir, fig_name, prompts, lambda_values, save_path):
                 draw.rectangle([x, y, x + thumb_size, y + thumb_size], fill='lightgray', outline='gray')
                 draw.text((x + 20, y + thumb_size // 2), "missing", fill='gray', font=font_small)
 
-    grid.save(save_path, quality=95)
+    _save_with_pdf(grid, save_path)
     print(f"  Figure summary saved: {save_path}")
     return grid
 
 
-def load_pipeline_and_model(checkpoint_path, device, dtype):
-    """Load SD3 pipeline and guidance scale model."""
+class AutoLambdaWrapper(nn.Module):
+    """Wraps a trained ScalarMLP to replace fixed lambda with geometry-based lambda_t.
+
+    At each denoising step:
+        delta_t  = v_c - v_u
+        x        = clip((1 + cos(v_u, delta_t)) / 2, 0, 1)
+        lambda_t = 0.5 + sign(x - 0.5) * sqrt(|2x - 1|) / 2
+
+    Symmetric sqrt spread around 0.5: preserves 0, 0.5, 1 exactly,
+    stretches mid-range values toward extremes for more dynamic range.
+    """
+
+    def __init__(self, mlp):
+        super().__init__()
+        self.mlp = mlp
+
+    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text):
+        v_u = noise_pred_uncond
+        delta_t = noise_pred_text - noise_pred_uncond
+        B = v_u.shape[0]
+        cos_sim = F.cosine_similarity(v_u.reshape(B, -1), delta_t.reshape(B, -1), dim=1)
+        x = torch.clamp((1.0 + cos_sim) / 2.0, 0.0, 1.0)
+        lambda_t = 0.5 + torch.sign(x - 0.5) * torch.sqrt(torch.abs(2.0 * x - 1.0)) / 2.0
+
+        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text)
+
+
+def load_pipeline_and_model(checkpoint_path, device, dtype, auto_lambda=False):
+    """Load SD3 pipeline and guidance scale model.
+
+    Returns (pipeline, guidance_scale_model, training_num_timesteps).
+    training_num_timesteps is read from the checkpoint config (or None if absent).
+    """
     from src.pipelines.my_pipeline_stable_diffusion3 import MyStableDiffusion3Pipeline
     from src.model.guidance_scale_model import ScalarMLP
 
@@ -265,6 +305,7 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
         delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
         lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
         t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
+        num_timesteps=model_cfg.get('num_timesteps'),
         delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
         w_bias=model_cfg.get('w_bias', 1.0),
         w_scale=model_cfg.get('w_scale', 1.0),
@@ -281,7 +322,13 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
                 f"Training likely diverged. Use an earlier checkpoint."
             )
 
-    return pipeline, guidance_scale_model
+    if auto_lambda:
+        guidance_scale_model = AutoLambdaWrapper(guidance_scale_model)
+        guidance_scale_model.eval()
+        print("  Auto-lambda wrapper enabled: λ_geo = clip((1+cos(v_u,Δv))/2, 0, 1)")
+
+    training_num_timesteps = checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps')
+    return pipeline, guidance_scale_model, training_num_timesteps
 
 
 def generate_image(pipeline, guidance_scale_model, prompt, lambda_val, seed, device,
@@ -359,7 +406,18 @@ def main():
                         help='Overwrite existing images instead of skipping')
     parser.add_argument('--baselines', action='store_true',
                         help='Also generate baseline images (CFG w=7, CFG w=12, CFG++ w=0.8)')
+    parser.add_argument('--auto_lambda', action='store_true', default=True,
+                        help='Generate images with geometry-based auto-lambda (default: on)')
+    parser.add_argument('--no_auto_lambda', action='store_false', dest='auto_lambda',
+                        help='Disable auto-lambda generation')
+    parser.add_argument('--num_steps', type=int, default=None,
+                        help='Number of inference steps (must match training num_timesteps)')
     args = parser.parse_args()
+
+    # Override global NUM_INFERENCE_STEPS if provided
+    global NUM_INFERENCE_STEPS
+    if args.num_steps is not None:
+        NUM_INFERENCE_STEPS = args.num_steps
 
     if not torch.cuda.is_available():
         print("FATAL: CUDA not available. Refusing to run on CPU (float16 will hang).")
@@ -386,7 +444,23 @@ def main():
         print(f"ERROR: Checkpoint not found at {checkpoint_path}")
         sys.exit(1)
 
-    pipeline, guidance_scale_model = load_pipeline_and_model(checkpoint_path, device, dtype)
+    pipeline, guidance_scale_model, training_steps = load_pipeline_and_model(checkpoint_path, device, dtype)
+
+    # Auto-infer num_inference_steps from checkpoint if not explicitly set
+    if args.num_steps is None and training_steps is not None:
+        NUM_INFERENCE_STEPS = training_steps
+        print(f"  Auto-inferred num_inference_steps={NUM_INFERENCE_STEPS} from checkpoint")
+
+    # Build auto-lambda model if requested (wraps the same MLP)
+    auto_lambda_model = None
+    if args.auto_lambda:
+        auto_lambda_model = AutoLambdaWrapper(
+            guidance_scale_model.mlp if isinstance(guidance_scale_model, AutoLambdaWrapper)
+            else guidance_scale_model
+        )
+        auto_lambda_model.eval()
+        print("  Auto-lambda enabled: λ_geo = clip((1+cos(v_u,Δv))/2, 0, 1)")
+
     if rank == 0:
         wb.init_sampling(vars(args), guidance_scale_model)
 
@@ -416,8 +490,8 @@ def main():
     prompt_filter = set(args.prompts) if args.prompts else None
 
     # Build flat work list: [(fig_name, prompt_id, prompt_text, task_type, task_info), ...]
-    # task_type: "lambda" or "baseline"
-    # task_info: lambda_val (float) or (bl_dir_name, bl_label, bl_w, bl_cfgpp) tuple
+    # task_type: "lambda", "baseline", or "auto_lambda"
+    # task_info: lambda_val (float), (bl_dir_name, bl_label, bl_w, bl_cfgpp) tuple, or None
     all_work = []
     for fig_name in figures_to_process:
         if fig_name not in PROMPTS_BY_FIGURE:
@@ -427,6 +501,8 @@ def main():
                 continue
             for lam in lambda_values:
                 all_work.append((fig_name, prompt_id, prompt_text, "lambda", lam))
+            if args.auto_lambda:
+                all_work.append((fig_name, prompt_id, prompt_text, "auto_lambda", None))
             if args.baselines:
                 for bl in BASELINES:
                     all_work.append((fig_name, prompt_id, prompt_text, "baseline", bl))
@@ -492,6 +568,45 @@ def main():
                 print(f"  [R{rank}] ERROR prompt {prompt_id} λ={lam:.2f}: {e}")
                 image_counter += 1
 
+        elif task_type == "auto_lambda":
+            al_dir = os.path.join(prompt_dir, "auto_lambda")
+            os.makedirs(al_dir, exist_ok=True)
+            al_image_path = os.path.join(al_dir, f"seed_{SEED}.png")
+            al_meta_path = os.path.join(al_dir, "meta.json")
+
+            if os.path.exists(al_image_path) and not args.force:
+                print(f"  prompt {prompt_id} auto_lambda - exists, skipping")
+                image_counter += 1
+                continue
+
+            al_t0 = datetime.datetime.now()
+            try:
+                al_img = generate_image(
+                    pipeline, auto_lambda_model,
+                    prompt_text, 0.0, SEED, device,
+                    cached_embeds=prompt_embed_cache.get(prompt_text),
+                )
+                al_img.save(al_image_path)
+                al_meta = {
+                    "prompt_id": prompt_id, "prompt": prompt_text,
+                    "method": "auto_lambda",
+                    "lambda_formula": "clip((1+cos(v_u, delta_v))/2, 0, 1)",
+                    "seed": SEED,
+                    "guidance_scale": GUIDANCE_SCALE,
+                    "num_inference_steps": NUM_INFERENCE_STEPS,
+                    "checkpoint": args.checkpoint,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                }
+                with open(al_meta_path, 'w') as f:
+                    json.dump(al_meta, f, indent=2)
+                total_images += 1
+                image_counter += 1
+                al_sec = (datetime.datetime.now() - al_t0).total_seconds()
+                print(f"  prompt {prompt_id} auto_lambda | {al_sec:.1f}s | {image_counter}/{total_expected}", flush=True)
+            except Exception as e:
+                print(f"  [R{rank}] ERROR prompt {prompt_id} auto_lambda: {e}")
+                image_counter += 1
+
         else:  # baseline
             bl_dir_name, bl_label, bl_w, bl_cfgpp = task_info
             bl_dir = os.path.join(prompt_dir, bl_dir_name)
@@ -530,11 +645,27 @@ def main():
                 image_counter += 1
 
     # --- Barrier: wait for all ranks before summaries ---
+    # Use a simple file-based barrier to avoid NCCL init issues (the process
+    # group is never used during generation, so late initialization is fragile).
     if world_size > 1:
-        import torch.distributed as dist
-        if not dist.is_initialized():
-            dist.init_process_group("nccl")
-        dist.barrier()
+        import time as _time
+        barrier_dir = os.path.join(output_root, ".barrier")
+        os.makedirs(barrier_dir, exist_ok=True)
+        # Each rank writes a marker
+        open(os.path.join(barrier_dir, f"rank_{rank}"), "w").close()
+        # Rank 0 waits for all markers
+        if rank == 0:
+            for r in range(world_size):
+                marker = os.path.join(barrier_dir, f"rank_{r}")
+                while not os.path.exists(marker):
+                    _time.sleep(2)
+            # Clean up
+            import shutil
+            shutil.rmtree(barrier_dir, ignore_errors=True)
+        else:
+            # Non-zero ranks: wait for barrier dir to be removed (rank 0 done)
+            while os.path.exists(os.path.join(barrier_dir, f"rank_{rank}")):
+                _time.sleep(2)
 
     # Only rank 0 creates grids and summaries
     if rank == 0:
@@ -559,6 +690,11 @@ def main():
                     if os.path.exists(img_path):
                         images_for_grid.append(Image.open(img_path))
                         labels_for_grid.append(f"λ={lam:.2f}")
+                if args.auto_lambda:
+                    img_path = os.path.join(prompt_dir, "auto_lambda", f"seed_{SEED}.png")
+                    if os.path.exists(img_path):
+                        images_for_grid.append(Image.open(img_path))
+                        labels_for_grid.append("auto-λ")
                 if args.baselines:
                     for bl_dir_name, bl_label, _, _ in BASELINES:
                         img_path = os.path.join(prompt_dir, bl_dir_name, f"seed_{SEED}.png")
@@ -580,7 +716,9 @@ def main():
             fig_prompts = [(pid, pt) for pid, pt in prompts
                            if prompt_filter is None or pid in prompt_filter]
             if fig_prompts:
-                summary_lambdas = list(lambda_values) + ([(bl[0], bl[1]) for bl in BASELINES] if args.baselines else [])
+                summary_lambdas = list(lambda_values) \
+                    + ([("auto_lambda", "auto-λ")] if args.auto_lambda else []) \
+                    + ([(bl[0], bl[1]) for bl in BASELINES] if args.baselines else [])
                 summary_path = os.path.join(fig_dir, f"{fig_name}_summary.png")
                 create_figure_summary(fig_dir, fig_name, fig_prompts, summary_lambdas, summary_path)
 
@@ -609,9 +747,6 @@ def main():
     print(f"{'='*60}\n")
     if rank == 0:
         wb.finish()
-
-    if world_size > 1 and dist.is_initialized():
-        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

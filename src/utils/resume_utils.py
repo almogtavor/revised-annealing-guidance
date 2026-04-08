@@ -5,48 +5,22 @@ import glob
 import torch
 
 
-def find_latest_checkpoint(config):
-    """Find the most recent checkpoint in the newest checkpoint directory.
-
-    Only looks in the most recently created checkpoints_* folder to avoid
-    loading weights from older runs with different configs.
-
-    Returns (path, step) or (None, 0) if no checkpoint found.
-    """
-    out_dir = config['training']['out_dir']
-    # Find the newest checkpoint directory by modification time
-    ckpt_dirs = glob.glob(os.path.join(out_dir, 'checkpoints_*'))
-    if not ckpt_dirs:
-        return None, 0
-
-    latest_dir = max(ckpt_dirs, key=os.path.getmtime)
-    matches = glob.glob(os.path.join(latest_dir, 'checkpoint_step_*.pt'))
-    if not matches:
-        return None, 0
-
-    # Pick highest step in the newest directory
-    best_path, best_step = None, 0
-    step_re = re.compile(r'checkpoint_step_(\d+)\.pt$')
-    for path in matches:
-        m = step_re.search(path)
-        if m:
-            step = int(m.group(1))
-            if step > best_step:
-                best_step = step
-                best_path = path
-    return best_path, best_step
-
-
 def maybe_resume(config, model, optimizer=None):
-    """Load latest checkpoint if available. Returns the step to resume from.
+    """Load checkpoint only if 'resume_from' is set in config.training.
 
-    Also saves optimizer state in future checkpoints if optimizer is provided.
+    Set  training.resume_from: path/to/checkpoint_step_XXXX.pt  in the YAML
+    to resume. If the key is absent or null, training starts from scratch.
+
+    Returns the step to resume from (0 if no resume).
     """
-    ckpt_path, step = find_latest_checkpoint(config)
-    if ckpt_path is None:
+    ckpt_path = config.get('training', {}).get('resume_from')
+    if not ckpt_path:
         return 0
 
-    print(f"Resuming from checkpoint: {ckpt_path} (step {step})", flush=True)
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"resume_from checkpoint not found: {ckpt_path}")
+
+    print(f"Resuming from checkpoint: {ckpt_path}", flush=True)
     ckpt = torch.load(ckpt_path, map_location='cpu')
     # Support both old ('model_state_dict') and new ('guidance_scale_model') key names
     state_key = 'guidance_scale_model' if 'guidance_scale_model' in ckpt else 'model_state_dict'
@@ -56,6 +30,8 @@ def maybe_resume(config, model, optimizer=None):
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         print("  Restored optimizer state.", flush=True)
 
+    step = ckpt.get('step', 0)
+    print(f"  Resuming from step {step}.", flush=True)
     return step
 
 

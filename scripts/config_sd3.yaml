@@ -2,7 +2,7 @@ seed: 42
 diffusion:
   model_id: stabilityai/stable-diffusion-3-medium-diffusers
   num_timesteps: 50
-  vanilla_cfg: 1
+  vanilla_cfg: 0
   scheduler_kwargs:
     beta_start: 0.00085
     beta_end: 0.012
@@ -27,7 +27,7 @@ guidance_scale_model:
 
 training:
   save_interval: 200
-  max_steps: 40000
+  max_steps: 20000
   batch_size: 1
   accumulation_steps: 16
   out_dir: ./output

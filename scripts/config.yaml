@@ -3,7 +3,7 @@ low_memory: false
 diffusion:
   model_id: stabilityai/stable-diffusion-xl-base-1.0
   num_timesteps: 50
-  vanilla_cfg: 1
+  vanilla_cfg: 0
   scheduler_kwargs:
     beta_start: 0.00085
     beta_end: 0.012

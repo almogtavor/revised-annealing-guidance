@@ -73,9 +73,11 @@ def _patch_dataloader():
         sampler = DistributedSampler(
             dataset, num_replicas=_world_size, rank=_rank, shuffle=True,
         )
-        return DataLoader(
+        dl = DataLoader(
             dataset, batch_size=batch_size, sampler=sampler, pin_memory=True,
         )
+        dl.distributed_sampler = sampler
+        return dl
 
     train_utils.get_data_loader = _ddp_get_data_loader
 

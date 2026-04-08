@@ -89,6 +89,7 @@ if os.path.exists(checkpoint_path):
         delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
         lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
         t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
+        num_timesteps=model_cfg.get('num_timesteps'),
         delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
         w_bias=model_cfg.get('w_bias', 1.0),
         w_scale=model_cfg.get('w_scale', 1.0),

@@ -1,7 +1,8 @@
 """Reproduce Fig 2: CFG vs CFG++ vs Annealing Guidance comparison.
 
 Generates:
-  1. Images for two prompts under three methods (CFG w=10, CFG++ w=1, Annealing λ=0.4)
+  1. Images for two prompts under three/four methods
+     (CFG w=10, CFG++ w=1, Annealing λ=0.4, and optionally Auto-λ)
   2. Guidance scale vs timestep plot for annealing (both prompts)
   3. Combined figure matching paper layout
 """
@@ -9,6 +10,8 @@ import os
 import sys
 import json
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import datetime
 
@@ -28,7 +31,7 @@ PROMPTS = [
 ]
 
 SEED = 1000
-NUM_INFERENCE_STEPS = 28
+NUM_INFERENCE_STEPS = 50  # default; overridable via --num_steps
 ANNEALING_LAMBDA = 0.4
 CFG_GUIDANCE_SCALE = 10.0       # w=10 for standard CFG
 CFGPP_GUIDANCE_SCALE = 1.0      # w=1 for CFG++  (flat green line in paper)
@@ -68,6 +71,7 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
         delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
         lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
         t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
+        num_timesteps=model_cfg.get('num_timesteps'),
         delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
         w_bias=model_cfg.get('w_bias', 1.0),
         w_scale=model_cfg.get('w_scale', 1.0),
@@ -76,7 +80,37 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
     guidance_scale_model.load_state_dict(state_dict, strict=True)
     guidance_scale_model.eval()
 
-    return pipeline, guidance_scale_model
+    training_num_timesteps = checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps')
+    return pipeline, guidance_scale_model, training_num_timesteps
+
+
+class AutoLambdaWrapper(nn.Module):
+    """Wraps ScalarMLP to use geometry-based lambda_t, capturing both w and lambda_t.
+
+    x        = clip((1 + cos(v_u, delta_t)) / 2, 0, 1)
+    lambda_t = 0.5 + sign(x - 0.5) * sqrt(|2x - 1|) / 2
+
+    Symmetric sqrt spread around 0.5: preserves 0, 0.5, 1 exactly.
+    """
+
+    def __init__(self, mlp):
+        super().__init__()
+        self.mlp = mlp
+        self.lambda_trajectory = []  # filled during generation
+
+    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text):
+        v_u = noise_pred_uncond
+        delta_t = noise_pred_text - noise_pred_uncond
+        B = v_u.shape[0]
+        cos_sim = F.cosine_similarity(v_u.reshape(B, -1), delta_t.reshape(B, -1), dim=1)
+        x = torch.clamp((1.0 + cos_sim) / 2.0, 0.0, 1.0)
+        lambda_t = 0.5 + torch.sign(x - 0.5) * torch.sqrt(torch.abs(2.0 * x - 1.0)) / 2.0
+
+        self.lambda_trajectory.append(lambda_t.detach().float().mean().item())
+        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text)
+
+    def reset_trajectory(self):
+        self.lambda_trajectory = []
 
 
 def generate_cfg(pipeline, prompt, seed, device, guidance_scale, cached_embeds=None):
@@ -134,50 +168,85 @@ def generate_annealing(pipeline, guidance_scale_model, prompt, lambda_val, seed,
     return image, trajectory
 
 
-def plot_guidance_trajectories(traj_a, traj_b, save_path):
+def plot_guidance_trajectories(traj_a, traj_b, save_path,
+                               auto_traj_a=None, auto_traj_b=None,
+                               auto_lambda_vals_a=None, auto_lambda_vals_b=None):
     """Plot guidance scale vs timestep for both prompts, matching Fig 2 style."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    has_auto = auto_traj_a is not None
+    nrows = 2 if has_auto else 1
+    fig, axes = plt.subplots(nrows, 1, figsize=(8, 5 * nrows), squeeze=False)
 
-    # CFG++ flat line (green)
+    # --- Top plot: guidance scale w(t) ---
+    ax = axes[0, 0]
     ax.axhline(y=CFGPP_GUIDANCE_SCALE, color='#2ca02c', linewidth=3, label='CFG++ (A+B)')
 
-    # Annealing trajectories
     ts_a = [d["timestep"] for d in traj_a]
     ws_a = [d["guidance_scale"] for d in traj_a]
     ts_b = [d["timestep"] for d in traj_b]
     ws_b = [d["guidance_scale"] for d in traj_b]
 
-    ax.plot(ts_a, ws_a, color='#8b008b', linewidth=2.5, label='Annealing (A)')
-    ax.plot(ts_b, ws_b, color='#0000cd', linewidth=2.5, label='Annealing (B)')
+    ax.plot(ts_a, ws_a, color='#8b008b', linewidth=2.5, label='Annealing λ=0.4 (A)')
+    ax.plot(ts_b, ws_b, color='#0000cd', linewidth=2.5, label='Annealing λ=0.4 (B)')
+
+    if has_auto:
+        ts_aa = [d["timestep"] for d in auto_traj_a]
+        ws_aa = [d["guidance_scale"] for d in auto_traj_a]
+        ts_ab = [d["timestep"] for d in auto_traj_b]
+        ws_ab = [d["guidance_scale"] for d in auto_traj_b]
+        ax.plot(ts_aa, ws_aa, color='#ff6600', linewidth=2.5, linestyle='--', label='Auto-λ (A)')
+        ax.plot(ts_ab, ws_ab, color='#cc0000', linewidth=2.5, linestyle='--', label='Auto-λ (B)')
 
     ax.set_xlabel('Timestep', fontsize=14)
     ax.set_ylabel('Guidance Scale', fontsize=14)
-    ax.legend(fontsize=12, loc='upper left')
+    ax.legend(fontsize=10, loc='upper left')
     ax.tick_params(labelsize=12)
     ax.set_xlim(0, 1000)
 
+    # --- Bottom plot: auto-lambda λ_geo values over time ---
+    if has_auto:
+        ax2 = axes[1, 0]
+        ax2.plot(ts_aa, auto_lambda_vals_a, color='#ff6600', linewidth=2.5, label='λ_geo (A)')
+        ax2.plot(ts_ab, auto_lambda_vals_b, color='#cc0000', linewidth=2.5, label='λ_geo (B)')
+        ax2.set_xlabel('Timestep', fontsize=14)
+        ax2.set_ylabel('Auto-λ value', fontsize=14)
+        ax2.legend(fontsize=10, loc='upper left')
+        ax2.tick_params(labelsize=12)
+        ax2.set_xlim(0, 1000)
+        ax2.set_ylim(-0.05, 1.05)
+
     plt.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    fig.savefig(os.path.splitext(save_path)[0] + '.pdf', bbox_inches='tight')
     plt.close(fig)
     print(f"  Guidance scale plot saved: {save_path}")
 
 
-def create_comparison_figure(images_dict, traj_a, traj_b, save_path):
-    """Create the combined Fig 2: plot on top, image rows below."""
+def create_comparison_figure(images_dict, traj_a, traj_b, save_path,
+                             auto_traj_a=None, auto_traj_b=None,
+                             auto_lambda_vals_a=None, auto_lambda_vals_b=None):
+    """Create the combined Fig 2: plots on top, image rows below."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
 
-    fig = plt.figure(figsize=(12, 16))
-    gs = GridSpec(3, 3, figure=fig, height_ratios=[1.2, 1, 1],
+    has_auto = "Auto-λ (Ours)" in [m for (_, m) in images_dict.keys()]
+    methods = ["CFG", "CFG++", "Annealing (Ours)"]
+    if has_auto:
+        methods.append("Auto-λ (Ours)")
+    ncols = len(methods)
+    nplot_rows = 2 if has_auto else 1
+
+    fig = plt.figure(figsize=(4 * ncols, 4 * nplot_rows + 4 * 2 + 1))
+    gs = GridSpec(nplot_rows + 2, ncols, figure=fig,
+                  height_ratios=[1.2] * nplot_rows + [1, 1],
                   hspace=0.3, wspace=0.05)
 
-    # --- Top: Guidance scale plot spanning all columns ---
+    # --- Top plot: guidance scale w(t) ---
     ax_plot = fig.add_subplot(gs[0, :])
     ax_plot.axhline(y=CFGPP_GUIDANCE_SCALE, color='#2ca02c', linewidth=3, label='CFG++ (A+B)')
 
@@ -186,32 +255,52 @@ def create_comparison_figure(images_dict, traj_a, traj_b, save_path):
     ts_b = [d["timestep"] for d in traj_b]
     ws_b = [d["guidance_scale"] for d in traj_b]
 
-    ax_plot.plot(ts_a, ws_a, color='#8b008b', linewidth=2.5, label='Annealing (A)')
-    ax_plot.plot(ts_b, ws_b, color='#0000cd', linewidth=2.5, label='Annealing (B)')
+    ax_plot.plot(ts_a, ws_a, color='#8b008b', linewidth=2.5, label='Annealing λ=0.4 (A)')
+    ax_plot.plot(ts_b, ws_b, color='#0000cd', linewidth=2.5, label='Annealing λ=0.4 (B)')
+
+    if has_auto and auto_traj_a:
+        ts_aa = [d["timestep"] for d in auto_traj_a]
+        ws_aa = [d["guidance_scale"] for d in auto_traj_a]
+        ts_ab = [d["timestep"] for d in auto_traj_b]
+        ws_ab = [d["guidance_scale"] for d in auto_traj_b]
+        ax_plot.plot(ts_aa, ws_aa, color='#ff6600', linewidth=2.5, linestyle='--', label='Auto-λ (A)')
+        ax_plot.plot(ts_ab, ws_ab, color='#cc0000', linewidth=2.5, linestyle='--', label='Auto-λ (B)')
+
     ax_plot.set_xlabel('Timestep', fontsize=14)
     ax_plot.set_ylabel('Guidance Scale', fontsize=14)
-    ax_plot.legend(fontsize=12, loc='upper left')
+    ax_plot.legend(fontsize=10, loc='upper left')
     ax_plot.set_xlim(0, 1000)
     ax_plot.tick_params(labelsize=12)
 
-    # --- Row 1: Prompt A images ---
-    methods = ["CFG", "CFG++", "Annealing (Ours)"]
+    # --- Second plot row: auto-lambda λ_geo values ---
+    if has_auto and auto_lambda_vals_a:
+        ax_lam = fig.add_subplot(gs[1, :])
+        ax_lam.plot(ts_aa, auto_lambda_vals_a, color='#ff6600', linewidth=2.5, label='λ_geo (A)')
+        ax_lam.plot(ts_ab, auto_lambda_vals_b, color='#cc0000', linewidth=2.5, label='λ_geo (B)')
+        ax_lam.set_xlabel('Timestep', fontsize=14)
+        ax_lam.set_ylabel('Auto-λ value', fontsize=14)
+        ax_lam.legend(fontsize=10, loc='upper left')
+        ax_lam.set_xlim(0, 1000)
+        ax_lam.set_ylim(-0.05, 1.05)
+        ax_lam.tick_params(labelsize=12)
+
+    # --- Image rows ---
     for row_idx, (label, prompt) in enumerate(PROMPTS):
         for col_idx, method in enumerate(methods):
-            ax = fig.add_subplot(gs[1 + row_idx, col_idx])
-            img = images_dict[(label, method)]
-            ax.imshow(np.array(img))
+            ax = fig.add_subplot(gs[nplot_rows + row_idx, col_idx])
+            if (label, method) in images_dict:
+                ax.imshow(np.array(images_dict[(label, method)]))
             ax.axis('off')
             if row_idx == 0:
                 ax.set_title(method, fontsize=14, fontweight='bold')
 
-    # Add prompt labels
-    fig.text(0.02, 0.42, 'A: "Woman in black dress on the\nred carpet wearing a ring on the finger."',
+    fig.text(0.02, 0.28, 'A: "Woman in black dress on the\nred carpet wearing a ring on the finger."',
              fontsize=10, color='red', fontweight='bold', va='center')
-    fig.text(0.02, 0.15, 'B: "Two dogs, one cat."',
+    fig.text(0.02, 0.08, 'B: "Two dogs, one cat."',
              fontsize=10, color='blue', fontweight='bold', va='center')
 
     fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    fig.savefig(os.path.splitext(save_path)[0] + '.pdf', bbox_inches='tight')
     plt.close(fig)
     print(f"  Combined figure saved: {save_path}")
 
@@ -222,7 +311,17 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True, help='Guidance model checkpoint')
     parser.add_argument('--output_dir', type=str, default='results/fig2_comparison',
                         help='Output directory')
+    parser.add_argument('--auto_lambda', action='store_true', default=True,
+                        help='Generate auto-lambda images and plot lambda_geo trajectory (default: on)')
+    parser.add_argument('--no_auto_lambda', action='store_false', dest='auto_lambda',
+                        help='Disable auto-lambda generation')
+    parser.add_argument('--num_steps', type=int, default=None,
+                        help='Number of inference steps (must match training num_timesteps)')
     args = parser.parse_args()
+
+    global NUM_INFERENCE_STEPS
+    if args.num_steps is not None:
+        NUM_INFERENCE_STEPS = args.num_steps
 
     if not torch.cuda.is_available():
         print("FATAL: CUDA not available. Refusing to run on CPU (float16 will hang).")
@@ -240,7 +339,19 @@ def main():
         print(f"ERROR: Checkpoint not found at {checkpoint_path}")
         sys.exit(1)
 
-    pipeline, guidance_scale_model = load_pipeline_and_model(checkpoint_path, device, dtype)
+    pipeline, guidance_scale_model, training_steps = load_pipeline_and_model(checkpoint_path, device, dtype)
+
+    # Auto-infer num_inference_steps from checkpoint if not explicitly set
+    if args.num_steps is None and training_steps is not None:
+        NUM_INFERENCE_STEPS = training_steps
+        print(f"  Auto-inferred num_inference_steps={NUM_INFERENCE_STEPS} from checkpoint")
+
+    # Build auto-lambda wrapper if requested
+    auto_lambda_model = None
+    if args.auto_lambda:
+        auto_lambda_model = AutoLambdaWrapper(guidance_scale_model)
+        auto_lambda_model.eval()
+        print("  Auto-lambda enabled for fig2")
 
     # Pre-encode prompts
     print("Pre-encoding prompts...")
@@ -260,6 +371,8 @@ def main():
 
     images = {}  # (label, method) -> PIL Image
     trajectories = {}  # label -> trajectory list
+    auto_trajectories = {}  # label -> trajectory list (w values)
+    auto_lambda_values = {}  # label -> list of lambda_geo values
 
     for label, prompt in PROMPTS:
         print(f"\n--- Prompt {label}: {prompt} ---")
@@ -294,26 +407,56 @@ def main():
         trajectories[label] = traj
         print(f"    Done in {sec:.1f}s | {len(traj)} timesteps captured")
 
+        # 4) Auto-lambda (if requested)
+        if auto_lambda_model is not None:
+            print(f"  Generating Auto-λ...")
+            auto_lambda_model.reset_trajectory()
+            t0 = datetime.datetime.now()
+            img_auto, auto_traj = generate_annealing(
+                pipeline, auto_lambda_model, prompt, 0.0, SEED, device, cached)
+            sec = (datetime.datetime.now() - t0).total_seconds()
+            img_auto.save(os.path.join(output_dir, f"prompt_{label}_auto_lambda.png"))
+            images[(label, "Auto-λ (Ours)")] = img_auto
+            auto_trajectories[label] = auto_traj
+            auto_lambda_values[label] = list(auto_lambda_model.lambda_trajectory)
+            print(f"    Done in {sec:.1f}s | {len(auto_traj)} timesteps, "
+                  f"λ_geo range [{min(auto_lambda_values[label]):.3f}, {max(auto_lambda_values[label]):.3f}]")
+
     # Save trajectories as JSON
+    traj_data = {"annealing": trajectories}
+    if auto_trajectories:
+        traj_data["auto_lambda_w"] = {k: v for k, v in auto_trajectories.items()}
+        traj_data["auto_lambda_geo"] = {k: v for k, v in auto_lambda_values.items()}
     traj_path = os.path.join(output_dir, "guidance_trajectories.json")
     with open(traj_path, 'w') as f:
-        json.dump(trajectories, f, indent=2)
+        json.dump(traj_data, f, indent=2)
     print(f"\nTrajectories saved: {traj_path}")
 
     # Plot guidance scale vs timestep
     plot_guidance_trajectories(
         trajectories["A"], trajectories["B"],
-        os.path.join(output_dir, "guidance_scale_plot.png"))
+        os.path.join(output_dir, "guidance_scale_plot.png"),
+        auto_traj_a=auto_trajectories.get("A"),
+        auto_traj_b=auto_trajectories.get("B"),
+        auto_lambda_vals_a=auto_lambda_values.get("A"),
+        auto_lambda_vals_b=auto_lambda_values.get("B"))
 
     # Create combined figure
     create_comparison_figure(
         images, trajectories["A"], trajectories["B"],
-        os.path.join(output_dir, "fig2_combined.png"))
+        os.path.join(output_dir, "fig2_combined.png"),
+        auto_traj_a=auto_trajectories.get("A"),
+        auto_traj_b=auto_trajectories.get("B"),
+        auto_lambda_vals_a=auto_lambda_values.get("A"),
+        auto_lambda_vals_b=auto_lambda_values.get("B"))
 
-    # Individual image grid per prompt (CFG | CFG++ | Annealing)
+    # Individual image grid per prompt
+    grid_methods = ["CFG", "CFG++", "Annealing (Ours)"]
+    if auto_lambda_model is not None:
+        grid_methods.append("Auto-λ (Ours)")
     for label, prompt in PROMPTS:
-        row_images = [images[(label, m)] for m in ["CFG", "CFG++", "Annealing (Ours)"]]
-        row_labels = ["CFG", "CFG++", "Annealing (Ours)"]
+        row_images = [images[(label, m)] for m in grid_methods]
+        row_labels = list(grid_methods)
         grid_w = sum(img.width for img in row_images)
         grid_h = row_images[0].height + 50
         grid = Image.new('RGB', (grid_w, grid_h), 'white')

@@ -161,7 +161,9 @@ else
     NGPUS=2
 fi
 NPROC="${NPROC:-$NGPUS}"
-echo "Starting SD3 DDP training (ema_no_delta_max_norm) with $NPROC GPUs..."
-echo "Config: scripts/config_sd3_ema_no_delta_max_norm.yaml"
-ANNEALING_GUIDANCE_CONFIG="scripts/config_sd3_ema_no_delta_max_norm.yaml" \
-    "$PY" -m torch.distributed.run --nproc_per_node="$NPROC" scripts/train.py
+MASTER_PORT=$((29500 + RANDOM % 1000))
+CONFIG="${TRAIN_CONFIG:-scripts/config_sd3_ema_no_delta_max_norm.yaml}"
+echo "Starting SD3 DDP training with $NPROC GPUs (master_port=$MASTER_PORT)..."
+echo "Config: $CONFIG"
+ANNEALING_GUIDANCE_CONFIG="$CONFIG" \
+    "$PY" -m torch.distributed.run --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" scripts/train.py

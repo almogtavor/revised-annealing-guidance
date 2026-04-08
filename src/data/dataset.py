@@ -49,13 +49,15 @@ class LaionDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-
-        with open(image_path.replace('.jpg', '.txt'), 'r') as f:
-            caption = f.readline().strip()
-
-        image = Image.open(image_path).convert("RGB")
-        image = self.transform(image)
-        caption = trim_to_77_tokens(caption)
-
-        return caption, image
+        for attempt in range(10):
+            image_path = self.image_paths[(idx + attempt) % len(self.image_paths)]
+            try:
+                with open(image_path.replace('.jpg', '.txt'), 'r') as f:
+                    caption = f.readline().strip()
+                image = Image.open(image_path).convert("RGB")
+                image = self.transform(image)
+                caption = trim_to_77_tokens(caption)
+                return caption, image
+            except OSError:
+                continue
+        raise RuntimeError(f"Failed to load sample after 10 attempts starting at idx {idx}")

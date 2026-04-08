@@ -9,7 +9,7 @@
 #SBATCH --output=logs/sanity/slurm_sd3_sanity_eps_%j.log
 #SBATCH --error=logs/sanity/slurm_sd3_sanity_eps_%j.log
 #SBATCH --partition=killable
-#SBATCH --nodelist=n-801,n-802,n-803,n-804,n-805,n-806,n-601,n-602
+#SBATCH --nodelist=n-801,n-802,n-804,n-805,n-806,n-601,n-602
 
 # Sanity check: train with lambda=0 (epsilon loss only).
 # Expected: w should stay small (0 with CFG++ trick, 1 without).
@@ -149,8 +149,24 @@ else
 fi
 NPROC="${NPROC:-$NGPUS}"
 
+USE_CFG=0
+if [[ "${1:-}" == "--cfg" ]]; then
+	USE_CFG=1
+	shift
+fi
+if [[ $# -gt 0 ]]; then
+	echo "Usage: $0 [--cfg]"
+	exit 2
+fi
+
+CONFIG_PATH="scripts/config_sd3_sanity_eps_only.yaml"
+if [[ "$USE_CFG" -eq 1 ]]; then
+	CONFIG_PATH="scripts/config_sd3_sanity_eps_only_cfg.yaml"
+fi
+
 MASTER_PORT=$((29500 + RANDOM % 1000))
 echo "=== SANITY CHECK: epsilon loss only (lambda=0) ==="
+echo "Using config: $CONFIG_PATH"
 echo "Starting SD3 DDP training with $NPROC GPUs (master_port=$MASTER_PORT)..."
-ANNEALING_GUIDANCE_CONFIG=scripts/config_sd3_sanity_eps_only.yaml \
+ANNEALING_GUIDANCE_CONFIG="$CONFIG_PATH" \
     "$PY" -m torch.distributed.run --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" scripts/train.py

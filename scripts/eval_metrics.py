@@ -147,13 +147,15 @@ def load_guidance_model(checkpoint_path, device):
         delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
         lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
         t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
+        num_timesteps=model_cfg.get('num_timesteps'),
         delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
         w_bias=model_cfg.get('w_bias', 1.0),
         w_scale=model_cfg.get('w_scale', 1.0),
     ).to(device, dtype=torch.float32)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
-    return model
+    training_num_timesteps = checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps')
+    return model, training_num_timesteps
 
 
 def generate_single(pipeline, prompt, seed, device, guidance_scale,
@@ -269,20 +271,25 @@ def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
     if hasattr(pipeline.scheduler, 'init_noise_sigma'):
         latents = latents * pipeline.scheduler.init_noise_sigma
 
-    # Denoising loop with APG
+    # Denoising loop with APG (sequential uncond/cond to save memory)
     for i, t in enumerate(timesteps):
-        latent_model_input = torch.cat([latents] * 2)
-        timestep = t.expand(latent_model_input.shape[0])
+        timestep = t.expand(latents.shape[0])
 
-        noise_pred = pipeline.transformer(
-            hidden_states=latent_model_input,
+        noise_pred_uncond = pipeline.transformer(
+            hidden_states=latents,
             timestep=timestep,
-            encoder_hidden_states=torch.cat([negative_prompt_embeds, prompt_embeds]),
-            pooled_projections=torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds]),
+            encoder_hidden_states=negative_prompt_embeds,
+            pooled_projections=negative_pooled_prompt_embeds,
             return_dict=False,
         )[0]
 
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred_text = pipeline.transformer(
+            hidden_states=latents,
+            timestep=timestep,
+            encoder_hidden_states=prompt_embeds,
+            pooled_projections=pooled_prompt_embeds,
+            return_dict=False,
+        )[0]
 
         # APG: perpendicular guidance
         noise_pred = apg_guidance(noise_pred_uncond, noise_pred_text, guidance_scale)
@@ -317,6 +324,9 @@ def generate_images_for_config(pipeline, prompts, save_dir, device,
             guidance_scale_model=guidance_scale_model, guidance_lambda=guidance_lambda,
         )
         img.save(img_path)
+        del img
+        if idx % 50 == 0:
+            torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +451,13 @@ def main():
     parser.add_argument("--annealing_lambdas", type=float, nargs="+",
                         default=ANNEALING_LAMBDAS,
                         help="Lambda values to evaluate")
+    parser.add_argument("--num_steps", type=int, default=None,
+                        help="Number of inference steps (must match training num_timesteps)")
     args = parser.parse_args()
+
+    global NUM_INFERENCE_STEPS
+    if args.num_steps is not None:
+        NUM_INFERENCE_STEPS = args.num_steps
 
     rank, world_size, local_rank = get_rank_info()
     torch.cuda.set_device(local_rank)
@@ -494,7 +510,10 @@ def main():
 
         # --- Generate annealing images ---
         if args.checkpoint:
-            guidance_model = load_guidance_model(args.checkpoint, device)
+            guidance_model, training_steps = load_guidance_model(args.checkpoint, device)
+            if args.num_steps is None and training_steps is not None:
+                NUM_INFERENCE_STEPS = training_steps
+                print(f"  Auto-inferred num_inference_steps={NUM_INFERENCE_STEPS} from checkpoint")
             print(f"\n=== Generating annealing images ===")
             for lam in args.annealing_lambdas:
                 dir_name = f"annealing_lambda{lam:.2f}"

@@ -21,8 +21,10 @@ class ScalarMLP(nn.Module):
         delta_embed_dim: int = 4,
         lambda_embed_dim: int = 4,
         # Normalizations applied before embedding
-        t_embed_normalization: float = 1e3,
+        t_embed_normalization: float = 1e3,  # legacy; ignored when num_timesteps is set
         delta_embed_normalization: float = 5.0,
+        # Number of denoising steps (T); timestep input is normalized as t/T
+        num_timesteps: int = None,
         # Final affine on head output
         w_bias: float = 1.0,
         w_scale: float = 1.0,
@@ -44,7 +46,8 @@ class ScalarMLP(nn.Module):
         self.delta_embed_dim = delta_embed_dim
         self.lambda_embed_dim = lambda_embed_dim
 
-        self.t_embed_normalization = t_embed_normalization
+        # Use num_timesteps for normalization if provided, else fall back to legacy
+        self.t_embed_normalization = float(num_timesteps) if num_timesteps is not None else t_embed_normalization
         self.delta_embed_normalization = delta_embed_normalization
 
         self.w_bias = w_bias

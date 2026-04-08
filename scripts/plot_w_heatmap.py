@@ -22,6 +22,7 @@ def load_model(ckpt_path, device="cpu"):
         delta_embed_dim=cfg.get("delta_embed_dim", 4),
         lambda_embed_dim=cfg.get("lambda_embed_dim", 4),
         t_embed_normalization=cfg.get("t_embed_normalization", 1e3),
+        num_timesteps=cfg.get("num_timesteps"),
         delta_embed_normalization=cfg.get("delta_embed_normalization", 5.0),
         w_bias=cfg.get("w_bias", 1.0),
         w_scale=cfg.get("w_scale", 1.0),
@@ -112,8 +113,10 @@ def main():
 
     axes[0].set_ylabel(r"$\|\|\delta_t\|\|$")
 
-    # Shared colorbar
-    cbar = fig.colorbar(im, ax=axes, shrink=0.85, pad=0.02)
+    fig.tight_layout()
+
+    # Shared colorbar (added after tight_layout so it doesn't get overlapped)
+    cbar = fig.colorbar(im, ax=axes, shrink=0.85, pad=0.04)
     cbar.set_label("Guidance scale (w)", fontsize=11)
 
     label = f" ({args.lr_label})" if args.lr_label else ""
@@ -121,11 +124,11 @@ def main():
         f"Learned w(t, ||δ_t||, λ) - step {step}{label}",
         fontsize=13, y=1.02,
     )
-    fig.tight_layout()
 
     out = args.output or os.path.join(_REPO_ROOT, "results", "w_heatmap.png")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.splitext(out)[0] + ".pdf", bbox_inches="tight")
     print(f"Saved: {out}")
 
 

@@ -81,3 +81,6 @@ If you use this code for your research, please cite the following work:
       url={https://arxiv.org/abs/2506.24108}, 
 }
 ```
+
+
+./venv/bin/python scripts/plot_sanity_w_compare.py
