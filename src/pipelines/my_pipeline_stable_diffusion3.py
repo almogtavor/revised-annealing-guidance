@@ -21,7 +21,7 @@ from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.image_processor import PipelineImageInput
 from diffusers.utils import is_torch_xla_available
 
-from src.model.guidance_scale_model import ScalarMLP
+from src.model.guidance_scale_model import ScalarMLP, mlp_extras
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -241,12 +241,15 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
                     # --- BEGIN MODIFIED: Annealing guidance / CFG++ / CFG ---
+                    _next_t = timesteps[i + 1] if (i + 1 < len(timesteps)) else torch.tensor(0.0, device=t.device)
+
                     if use_annealing_guidance and guidance_scale_model is not None:
                         # Learned annealing guidance (CFG++ sampling)
                         orig_dtype = noise_pred_uncond.dtype
                         guidance_scale_pred = guidance_scale_model(
                             t, guidance_lambda,
-                            noise_pred_uncond.float(), noise_pred_text.float()
+                            noise_pred_uncond.float(), noise_pred_text.float(),
+                            **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds),
                         )
                         v_guided = noise_pred_uncond.float() + guidance_scale_pred * (noise_pred_text.float() - noise_pred_uncond.float())
                         _use_cfgpp_step = True
@@ -267,7 +270,9 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                             # --- FSG: Fixed-point Stochastic Guidance ---
                             # K inner iterations: guided forward → unconditional inverse
                             # to refine z_t before the final step.
+                            from src.utils import fsg_stats as _fsg_stats
                             z_t = latents.float()
+                            _z_t_prev = z_t.clone()
                             for _k in range(fsg_iterations):
                                 # (1) Compute v_u, v_c, delta at current z_t
                                 _fsg_input = torch.cat([z_t.to(orig_dtype)] * 2)
@@ -285,10 +290,15 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
 
                                 # (2) Predict w and form guided velocity
                                 if use_annealing_guidance and guidance_scale_model is not None:
-                                    _w = guidance_scale_model(t, guidance_lambda, _vu.float(), _vt.float())
+                                    _w = guidance_scale_model(t, guidance_lambda, _vu.float(), _vt.float(),
+                                                              **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds))
                                     _v_guided = _vu.float() + _w * (_vt.float() - _vu.float())
                                 else:
+                                    _w = torch.tensor(self._cfgpp_w, device=_vu.device)
                                     _v_guided = _vu.float() + self._cfgpp_w * (_vt.float() - _vu.float())
+
+                                # Record FSG stats: dz, w, delta_norm
+                                _z_t_prev = _fsg_stats.record_iteration(t, _k, z_t, _z_t_prev, _vt, _vu, _w)
 
                                 # (3) Guided forward step: z_t → z_s (using sigma_t1 as s)
                                 _x0 = z_t - sigma_t * _v_guided
@@ -328,7 +338,8 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                             )[0]
                             noise_pred_uncond, noise_pred_text = _fsg_pred.chunk(2)
                             if use_annealing_guidance and guidance_scale_model is not None:
-                                _w = guidance_scale_model(t, guidance_lambda, noise_pred_uncond.float(), noise_pred_text.float())
+                                _w = guidance_scale_model(t, guidance_lambda, noise_pred_uncond.float(), noise_pred_text.float(),
+                                                          **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds))
                                 v_guided = noise_pred_uncond.float() + _w * (noise_pred_text.float() - noise_pred_uncond.float())
                             else:
                                 v_guided = noise_pred_uncond.float() + self._cfgpp_w * (noise_pred_text.float() - noise_pred_uncond.float())

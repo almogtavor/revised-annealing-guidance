@@ -126,6 +126,7 @@ def plot_dynamic_range(model, output_path, device="cpu"):
     ax.set_title("Dynamic Range: where does λ matter?\n(wider band = more user control)", fontsize=13)
     ax.legend(fontsize=10)
     ax.set_xlim(0, 1000)
+    ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")

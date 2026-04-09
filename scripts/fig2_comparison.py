@@ -99,7 +99,7 @@ class AutoLambdaWrapper(nn.Module):
         self.mlp = mlp
         self.lambda_trajectory = []  # filled during generation
 
-    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text):
+    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text, **mlp_extras):
         v_u = noise_pred_uncond
         delta_t = noise_pred_text - noise_pred_uncond
         B = v_u.shape[0]
@@ -108,7 +108,7 @@ class AutoLambdaWrapper(nn.Module):
         lambda_t = 0.5 + torch.sign(x - 0.5) * torch.sqrt(torch.abs(2.0 * x - 1.0)) / 2.0
 
         self.lambda_trajectory.append(lambda_t.detach().float().mean().item())
-        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text)
+        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text, **mlp_extras)
 
     def reset_trajectory(self):
         self.lambda_trajectory = []
@@ -155,6 +155,43 @@ def generate_annealing(pipeline, guidance_scale_model, prompt, lambda_val, seed,
         use_annealing_guidance=True,
         guidance_scale_model=guidance_scale_model,
         guidance_lambda=lambda_val,
+    )
+    if cached_embeds:
+        kwargs.update(prompt_embeds=cached_embeds[0].to(device),
+                      negative_prompt_embeds=cached_embeds[1].to(device),
+                      pooled_prompt_embeds=cached_embeds[2].to(device),
+                      negative_pooled_prompt_embeds=cached_embeds[3].to(device))
+    else:
+        kwargs["prompt"] = prompt
+
+    image = pipeline(**kwargs).images[0]
+    handle.remove()
+    return image, trajectory
+
+
+def generate_annealing_fsg(pipeline, guidance_scale_model, prompt, lambda_val, seed, device,
+                           cached_embeds=None, fsg_iterations=3):
+    """Annealing guidance generation with FSG (Fixed-point Stochastic Guidance)."""
+    trajectory = []
+
+    def capture_hook(module, input, output):
+        t = input[0]
+        t_val = t.float().mean().item() if isinstance(t, torch.Tensor) else float(t)
+        w_val = output.detach().float().mean().item()
+        trajectory.append({"timestep": t_val, "guidance_scale": w_val})
+
+    handle = guidance_scale_model.register_forward_hook(capture_hook)
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    kwargs = dict(
+        guidance_scale=ANNEALING_BASE_GUIDANCE,
+        num_inference_steps=NUM_INFERENCE_STEPS,
+        generator=generator,
+        use_annealing_guidance=True,
+        guidance_scale_model=guidance_scale_model,
+        guidance_lambda=lambda_val,
+        use_fsg=True,
+        fsg_iterations=fsg_iterations,
     )
     if cached_embeds:
         kwargs.update(prompt_embeds=cached_embeds[0].to(device),
@@ -235,10 +272,17 @@ def create_comparison_figure(images_dict, traj_a, traj_b, save_path,
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
 
-    has_auto = "Auto-λ (Ours)" in [m for (_, m) in images_dict.keys()]
-    methods = ["CFG", "CFG++", "Annealing (Ours)"]
+    present_methods = set(m for (_, m) in images_dict.keys())
+    has_auto = "Auto-λ (Ours)" in present_methods
+    has_fsg = "Annealing FSG λ=0.4 (Ours)" in present_methods
+    has_fsg_auto = "Annealing FSG Auto-λ (Ours)" in present_methods
+    methods = ["CFG", "CFG++", "Annealing λ=0.4"]
     if has_auto:
         methods.append("Auto-λ (Ours)")
+    if has_fsg:
+        methods.append("Annealing FSG λ=0.4 (Ours)")
+    if has_fsg_auto:
+        methods.append("Annealing FSG Auto-λ (Ours)")
     ncols = len(methods)
     nplot_rows = 2 if has_auto else 1
 
@@ -404,7 +448,7 @@ def main():
             pipeline, guidance_scale_model, prompt, ANNEALING_LAMBDA, SEED, device, cached)
         sec = (datetime.datetime.now() - t0).total_seconds()
         img_anneal.save(os.path.join(output_dir, f"prompt_{label}_annealing.png"))
-        images[(label, "Annealing (Ours)")] = img_anneal
+        images[(label, "Annealing λ=0.4")] = img_anneal
         trajectories[label] = traj
         print(f"    Done in {sec:.1f}s | {len(traj)} timesteps captured")
 
@@ -422,6 +466,28 @@ def main():
             auto_lambda_values[label] = list(auto_lambda_model.lambda_trajectory)
             print(f"    Done in {sec:.1f}s | {len(auto_traj)} timesteps, "
                   f"λ_geo range [{min(auto_lambda_values[label]):.3f}, {max(auto_lambda_values[label]):.3f}]")
+
+        # 5) Annealing with FSG (λ=0.4)
+        print(f"  Generating Annealing FSG (λ={ANNEALING_LAMBDA})...")
+        t0 = datetime.datetime.now()
+        img_fsg, _ = generate_annealing_fsg(
+            pipeline, guidance_scale_model, prompt, ANNEALING_LAMBDA, SEED, device, cached)
+        sec = (datetime.datetime.now() - t0).total_seconds()
+        img_fsg.save(os.path.join(output_dir, f"prompt_{label}_annealing_fsg.png"))
+        images[(label, "Annealing FSG λ=0.4 (Ours)")] = img_fsg
+        print(f"    Done in {sec:.1f}s")
+
+        # 6) Annealing FSG with auto-lambda
+        if auto_lambda_model is not None:
+            print(f"  Generating Annealing FSG Auto-λ...")
+            auto_lambda_model.reset_trajectory()
+            t0 = datetime.datetime.now()
+            img_fsg_auto, _ = generate_annealing_fsg(
+                pipeline, auto_lambda_model, prompt, 0.0, SEED, device, cached)
+            sec = (datetime.datetime.now() - t0).total_seconds()
+            img_fsg_auto.save(os.path.join(output_dir, f"prompt_{label}_annealing_fsg_auto.png"))
+            images[(label, "Annealing FSG Auto-λ (Ours)")] = img_fsg_auto
+            print(f"    Done in {sec:.1f}s")
 
     # Save trajectories as JSON
     traj_data = {"annealing": trajectories}
@@ -452,9 +518,12 @@ def main():
         auto_lambda_vals_b=auto_lambda_values.get("B"))
 
     # Individual image grid per prompt
-    grid_methods = ["CFG", "CFG++", "Annealing (Ours)"]
+    grid_methods = ["CFG", "CFG++", "Annealing λ=0.4"]
     if auto_lambda_model is not None:
         grid_methods.append("Auto-λ (Ours)")
+    grid_methods.append("Annealing FSG λ=0.4 (Ours)")
+    if auto_lambda_model is not None:
+        grid_methods.append("Annealing FSG Auto-λ (Ours)")
     for label, prompt in PROMPTS:
         row_images = [images[(label, m)] for m in grid_methods]
         row_labels = list(grid_methods)

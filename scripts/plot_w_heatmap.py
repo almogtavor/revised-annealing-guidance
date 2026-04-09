@@ -111,7 +111,7 @@ def main():
             ax.set_title(f"λ = {lam}", fontsize=12)
         ax.set_xlabel("Timestep")
 
-    axes[0].set_ylabel(r"$\|\|\delta_t\|\|$")
+    axes[0].set_ylabel(r"$\|\delta_t\|$")
 
     fig.tight_layout()
 

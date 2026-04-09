@@ -252,7 +252,7 @@ class AutoLambdaWrapper(nn.Module):
         super().__init__()
         self.mlp = mlp
 
-    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text):
+    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text, **mlp_extras):
         v_u = noise_pred_uncond
         delta_t = noise_pred_text - noise_pred_uncond
         B = v_u.shape[0]
@@ -260,7 +260,7 @@ class AutoLambdaWrapper(nn.Module):
         x = torch.clamp((1.0 + cos_sim) / 2.0, 0.0, 1.0)
         lambda_t = 0.5 + torch.sign(x - 0.5) * torch.sqrt(torch.abs(2.0 * x - 1.0)) / 2.0
 
-        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text)
+        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text, **mlp_extras)
 
 
 def load_pipeline_and_model(checkpoint_path, device, dtype, auto_lambda=False):
@@ -818,6 +818,14 @@ def main():
                 "checkpoint": args.checkpoint,
                 "generated_at": datetime.datetime.now().isoformat(),
             }, f, indent=2)
+
+        # FSG convergence/interpretability plot (rank 0 stats)
+        try:
+            from src.utils import fsg_stats as _fsg_stats
+            if _fsg_stats.num_records() > 0:
+                _fsg_stats.plot(os.path.join(output_root, "interp_fsg_convergence.png"))
+        except Exception as _e:
+            print(f"  [warn] FSG stats plot failed: {_e}")
 
     end_time = datetime.datetime.now()
     duration = end_time - start_time
