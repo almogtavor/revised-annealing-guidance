@@ -132,6 +132,23 @@ def load_pipeline(device, dtype):
     return pipeline
 
 
+class AutoLambdaWrapper(torch.nn.Module):
+    """Drop-in wrapper that replaces fixed lambda with geometry-based lambda_t."""
+    def __init__(self, mlp):
+        super().__init__()
+        self.mlp = mlp
+
+    def forward(self, timestep, l, noise_pred_uncond, noise_pred_text, **mlp_extras):
+        import torch.nn.functional as F
+        v_u = noise_pred_uncond
+        delta_t = noise_pred_text - noise_pred_uncond
+        B = v_u.shape[0]
+        cos_sim = F.cosine_similarity(v_u.reshape(B, -1), delta_t.reshape(B, -1), dim=1)
+        x = torch.clamp((1.0 + cos_sim) / 2.0, 0.0, 1.0)
+        lambda_t = 0.5 + torch.sign(x - 0.5) * torch.sqrt(torch.abs(2.0 * x - 1.0)) / 2.0
+        return self.mlp(timestep, lambda_t, noise_pred_uncond, noise_pred_text, **mlp_extras)
+
+
 def load_guidance_model(checkpoint_path, device):
     from src.model.guidance_scale_model import ScalarMLP
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -146,6 +163,9 @@ def load_guidance_model(checkpoint_path, device):
         t_embed_dim=model_cfg.get('t_embed_dim', 4),
         delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
         lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
+        interval_embed_dim=model_cfg.get('interval_embed_dim', 0),
+        c_embed_dim=model_cfg.get('c_embed_dim', 0),
+        c_input_dim=model_cfg.get('c_input_dim', 2048),
         t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
         num_timesteps=model_cfg.get('num_timesteps') or checkpoint.get('config', {}).get('diffusion', {}).get('num_sampling_steps') or checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps'),
         delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
@@ -156,24 +176,20 @@ def load_guidance_model(checkpoint_path, device):
     model.eval()
     diff_cfg = checkpoint.get('config', {}).get('diffusion', {})
     training_num_timesteps = diff_cfg.get('num_sampling_steps') or diff_cfg.get('num_timesteps')
-    return model, training_num_timesteps
+    is_extended = model_cfg.get('interval_embed_dim', 0) > 0 or model_cfg.get('c_embed_dim', 0) > 0
+    return model, training_num_timesteps, is_extended
 
 
 def generate_single(pipeline, prompt, seed, device, guidance_scale,
                     use_cfgpp=False, use_apg=False,
-                    guidance_scale_model=None, guidance_lambda=None):
-    """Generate a single image. Supports CFG, CFG++, APG, and Annealing."""
+                    guidance_scale_model=None, guidance_lambda=None,
+                    use_fsg=False, fsg_iterations=3):
+    """Generate a single image. Supports CFG, CFG++, APG, Annealing, and FSG."""
     generator = torch.Generator(device="cuda:0").manual_seed(seed)
 
     use_annealing = guidance_scale_model is not None and guidance_lambda is not None
 
     if use_apg:
-        # APG needs a custom hook — we monkey-patch the pipeline for this call
-        # For now, use standard CFG and post-process with APG projection
-        # Actually, APG modifies the guidance step. We need to hook into the pipeline.
-        # The cleanest approach: generate with use_cfgpp=False, but intercept guidance.
-        # Since our pipeline doesn't support APG natively, we implement it via
-        # a temporary forward hook on the guidance step.
         return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator)
 
     kwargs = dict(
@@ -187,6 +203,9 @@ def generate_single(pipeline, prompt, seed, device, guidance_scale,
     if use_annealing:
         kwargs["guidance_scale_model"] = guidance_scale_model
         kwargs["guidance_lambda"] = guidance_lambda
+        if use_fsg:
+            kwargs["use_fsg"] = True
+            kwargs["fsg_iterations"] = fsg_iterations
 
     return pipeline(**kwargs).images[0]
 
@@ -307,6 +326,7 @@ def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
 def generate_images_for_config(pipeline, prompts, save_dir, device,
                                guidance_scale, use_cfgpp=False, use_apg=False,
                                guidance_scale_model=None, guidance_lambda=None,
+                               use_fsg=False, fsg_iterations=3,
                                rank=0, world_size=1):
     """Generate images for all prompts, saving to save_dir/. Skip existing."""
     os.makedirs(save_dir, exist_ok=True)
@@ -323,6 +343,7 @@ def generate_images_for_config(pipeline, prompts, save_dir, device,
             pipeline, caption, image_id + SEED_OFFSET, device,
             guidance_scale, use_cfgpp=use_cfgpp, use_apg=use_apg,
             guidance_scale_model=guidance_scale_model, guidance_lambda=guidance_lambda,
+            use_fsg=use_fsg, fsg_iterations=fsg_iterations,
         )
         img.save(img_path)
         del img
@@ -512,24 +533,39 @@ def main():
 
         # --- Generate annealing images ---
         if args.checkpoint:
-            guidance_model, training_steps = load_guidance_model(args.checkpoint, device)
+            guidance_model, training_steps, is_extended = load_guidance_model(args.checkpoint, device)
             if args.num_steps is None and training_steps is not None:
                 NUM_INFERENCE_STEPS = training_steps
                 print(f"  Auto-inferred num_inference_steps={NUM_INFERENCE_STEPS} from checkpoint")
-            print(f"\n=== Generating annealing images ===")
+
+            # Build the annealing variants to evaluate
+            # Always: 4 fixed lambdas + auto-lambda (regular inference)
+            # If extended MLP (FSG-trained): also add 4 lambdas + auto with FSG inference
+            auto_model = AutoLambdaWrapper(guidance_model).to(device).eval()
+            variants = []
             for lam in args.annealing_lambdas:
-                dir_name = f"annealing_lambda{lam:.2f}"
+                variants.append((f"annealing_lambda{lam:.2f}", guidance_model, lam, False))
+            variants.append(("annealing_auto_lambda", auto_model, 0.0, False))
+            if is_extended:
+                print("  Detected extended MLP — adding FSG inference variants")
+                for lam in args.annealing_lambdas:
+                    variants.append((f"annealing_fsg_lambda{lam:.2f}", guidance_model, lam, True))
+                variants.append(("annealing_fsg_auto_lambda", auto_model, 0.0, True))
+
+            print(f"\n=== Generating annealing images ({len(variants)} variants) ===")
+            for dir_name, model_to_use, lam, use_fsg in variants:
                 save_dir = os.path.join(args.output_dir, dir_name)
                 n_existing = len([f for f in os.listdir(save_dir) if f.endswith('.png')]) \
                     if os.path.exists(save_dir) else 0
                 if n_existing >= NUM_IMAGES:
-                    print(f"  λ={lam}: {n_existing} images exist, skipping")
+                    print(f"  {dir_name}: {n_existing} images exist, skipping")
                     continue
-                print(f"  λ={lam}: generating ({n_existing}/{NUM_IMAGES} cached)...")
+                print(f"  {dir_name}: generating ({n_existing}/{NUM_IMAGES} cached)...")
                 generate_images_for_config(
                     pipeline, prompts, save_dir, device,
                     guidance_scale=ANNEALING_GUIDANCE_SCALE,
-                    guidance_scale_model=guidance_model, guidance_lambda=lam,
+                    guidance_scale_model=model_to_use, guidance_lambda=lam,
+                    use_fsg=use_fsg,
                     rank=rank, world_size=world_size,
                 )
 
@@ -568,21 +604,40 @@ def main():
             })
             print(f"    FID={fid:.2f}  CLIP={clip_score:.4f}  ImageReward={img_reward:.4f}")
 
-        # Annealing
+        # Annealing (regular + auto, plus FSG variants if extended MLP)
         if args.checkpoint:
+            label = args.label or os.path.basename(args.checkpoint)
+
+            # Build the list of variants to score (matching what was generated above)
+            anneal_variants = []
             for lam in args.annealing_lambdas:
-                dir_name = f"annealing_lambda{lam:.2f}"
+                anneal_variants.append((f"annealing_lambda{lam:.2f}",
+                                        f"Annealing ({label})", lam))
+            anneal_variants.append(("annealing_auto_lambda",
+                                    f"Annealing auto-λ ({label})", "auto"))
+            # Detect extended MLP from checkpoint to also score FSG variants
+            ckpt = torch.load(args.checkpoint, map_location='cpu')
+            mcfg = ckpt.get('model_config') or ckpt.get('config', {}).get('guidance_scale_model', {})
+            is_extended = mcfg.get('interval_embed_dim', 0) > 0 or mcfg.get('c_embed_dim', 0) > 0
+            del ckpt
+            if is_extended:
+                for lam in args.annealing_lambdas:
+                    anneal_variants.append((f"annealing_fsg_lambda{lam:.2f}",
+                                            f"Annealing FSG ({label})", lam))
+                anneal_variants.append(("annealing_fsg_auto_lambda",
+                                        f"Annealing FSG auto-λ ({label})", "auto"))
+
+            for dir_name, method_label, lam in anneal_variants:
                 gen_dir = os.path.join(args.output_dir, dir_name)
                 if not os.path.exists(gen_dir):
                     print(f"  {dir_name}: no images found, skipping")
                     continue
-                print(f"\n  Computing metrics for annealing λ={lam}...")
+                print(f"\n  Computing metrics for {dir_name}...")
                 fid = compute_fid(gen_dir, coco_val_dir)
                 clip_score = compute_clip_score(gen_dir, prompts)
                 img_reward = compute_image_reward(gen_dir, prompts)
-                label = args.label or os.path.basename(args.checkpoint)
                 results.append({
-                    "method": f"Annealing ({label})",
+                    "method": method_label,
                     "config": dir_name,
                     "guidance_scale": ANNEALING_GUIDANCE_SCALE,
                     "lambda": lam,

@@ -141,3 +141,22 @@ class ScalarMLP(nn.Module):
         if guidance_scale.shape[1] == 1:
             guidance_scale = guidance_scale.squeeze(-1)
         return guidance_scale
+
+
+def mlp_extras(model, t, next_t, pooled_prompt_embeds):
+    """Build extra kwargs for extended-MLP guidance models trained with interval & c_emb conditioning.
+
+    Args:
+        model: ScalarMLP (possibly wrapped in AutoLambdaWrapper).
+        t: current timestep tensor.
+        next_t: next timestep tensor (or 0-tensor at the final step).
+        pooled_prompt_embeds: doubled [uncond, cond] pooled prompt embeds; the cond half is used.
+    """
+    kw = {}
+    inner = getattr(model, 'mlp', model)  # unwrap AutoLambdaWrapper if any
+    if getattr(inner, 'interval_embed_dim', 0) > 0:
+        kw['interval'] = (t.float() - next_t.float()) / 1000.0
+    if getattr(inner, 'c_embed_dim', 0) > 0:
+        # pooled_prompt_embeds is doubled [uncond, cond]; take cond half
+        kw['c_emb'] = pooled_prompt_embeds[pooled_prompt_embeds.shape[0] // 2:].float()
+    return kw
