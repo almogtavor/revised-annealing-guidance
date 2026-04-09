@@ -300,7 +300,12 @@ print(f"Dataloader ready: {len(dataloader)} batches/epoch", flush=True)
 
 resume_step = resume_utils.maybe_resume(config, guidance_scale_network, optimizer)
 
-forward_fn = forward_pass_sd3 if is_sd3 else forward_pass
+if is_sd3 and config.get('fsg', {}).get('enabled', False):
+    from src.utils.fsg_utils import forward_pass_fsg
+    forward_fn = forward_pass_fsg
+    print("FSG training enabled", flush=True)
+else:
+    forward_fn = forward_pass_sd3 if is_sd3 else forward_pass
 wb.init_training(config, guidance_scale_network, n_samples=len(dataloader))
 train(config, pipeline, guidance_scale_network, optimizer, dataloader, forward_fn=forward_fn, resume_step=resume_step)
 wb.finish()

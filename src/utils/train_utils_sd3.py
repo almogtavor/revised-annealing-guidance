@@ -108,8 +108,10 @@ def run_auto_sample(config):
     os.makedirs(os.path.join(repo, "logs", "sampling"), exist_ok=True)
     print(f"\n{'='*60}\nSUBMITTING SAMPLING JOB: {ckpt_id}\n{'='*60}\n", flush=True)
     export_vars = f"ALL,SD3_SAMPLE_CHECKPOINT={latest},SD3_SAMPLE_CHECKPOINT_ID={ckpt_id}"
+    n_steps = config.get('diffusion', {}).get('num_timesteps', '')
+    job_name = f"sample-{ckpt_id}" if not n_steps else f"sample-steps{n_steps}"
     result = subprocess.run(
-        ["sbatch", "--export", export_vars, script],
+        ["sbatch", "--job-name", job_name, "--export", export_vars, script],
         cwd=repo, capture_output=True, text=True)
     print(result.stdout.strip(), flush=True)
     if result.returncode != 0:

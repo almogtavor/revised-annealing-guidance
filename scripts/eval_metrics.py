@@ -34,7 +34,7 @@ if _REPO_ROOT not in sys.path:
 # ---------------------------------------------------------------------------
 # Constants matching the paper
 # ---------------------------------------------------------------------------
-NUM_IMAGES = 5000
+NUM_IMAGES = 3000
 NUM_INFERENCE_STEPS = 28
 SEED_OFFSET = 0  # seed = image_id (from COCO)
 
@@ -58,7 +58,7 @@ BASELINE_CONFIGS = [
 ANNEALING_LAMBDAS = [0.05, 0.4, 0.7, 0.8]
 ANNEALING_GUIDANCE_SCALE = 7.0
 
-BASELINE_CACHE_DIR = os.path.join(_REPO_ROOT, "results", "baseline_cache")
+_BASELINE_CACHE_ROOT = os.path.join(_REPO_ROOT, "results", "baseline_cache")
 
 # ---------------------------------------------------------------------------
 # COCO 2017 val helpers
@@ -476,6 +476,7 @@ def main():
 
     coco_val_dir = os.path.join(args.coco_dir, "val2017")
     os.makedirs(args.output_dir, exist_ok=True)
+    BASELINE_CACHE_DIR = os.path.join(_BASELINE_CACHE_ROOT, f"steps{NUM_INFERENCE_STEPS}_n{NUM_IMAGES}")
     os.makedirs(BASELINE_CACHE_DIR, exist_ok=True)
 
     # Resolve which baselines this job handles

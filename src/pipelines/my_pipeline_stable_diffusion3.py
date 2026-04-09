@@ -281,6 +281,7 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                     return_dict=False,
                                 )[0]
                                 _vu, _vt = _fsg_pred.chunk(2)
+                                del _fsg_pred, _fsg_input
 
                                 # (2) Predict w and form guided velocity
                                 if use_annealing_guidance and guidance_scale_model is not None:
@@ -293,9 +294,9 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                 _x0 = z_t - sigma_t * _v_guided
                                 _eps_u = z_t + (1.0 - sigma_t) * _vu.float()
                                 z_s = (1.0 - sigma_t1) * _x0 + sigma_t1 * _eps_u
+                                del _x0, _eps_u, _v_guided, _vu, _vt
 
                                 # (4) Unconditional inverse step: z_s → z_t
-                                # Run transformer on z_s at t_{i+1} to get v_u only
                                 _fsg_inv_ts = timesteps[i + 1] if (i + 1 < len(timesteps)) else t
                                 _fsg_inv_ts = _fsg_inv_ts.expand(z_s.shape[0])
                                 _vu_s = self.transformer(
@@ -307,11 +308,12 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                     return_dict=False,
                                 )[0].float()
 
-                                # Inverse: z_t = z_s + (sigma_t - sigma_t1) * v_u(z_s)
-                                # Using flow-matching: z_t = (1-sigma_t)*x0_inv + sigma_t*eps_inv
+                                # Inverse flow: z_s at sigma_s → z_t at sigma_t
                                 _x0_inv = z_s - sigma_t1 * _vu_s
                                 _eps_inv = z_s + (1.0 - sigma_t1) * _vu_s
                                 z_t = (1.0 - sigma_t) * _x0_inv + sigma_t * _eps_inv
+                                del z_s, _vu_s, _x0_inv, _eps_inv
+                                torch.cuda.empty_cache()
 
                             # Final: recompute guidance at refined z_t and do actual step
                             _fsg_input = torch.cat([z_t.to(orig_dtype)] * 2)

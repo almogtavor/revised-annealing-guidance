@@ -20,6 +20,7 @@ guidance_scale_model:
   lambda_embed_dim: 4
   delta_embed_dim: 4
   t_embed_dim: 4
+  t_embed_normalization: 1000
   delta_embed_normalization: 1.0
   w_scale: 1
   w_bias: 1

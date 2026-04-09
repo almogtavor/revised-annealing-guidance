@@ -20,8 +20,11 @@ class ScalarMLP(nn.Module):
         t_embed_dim: int = 4,
         delta_embed_dim: int = 4,
         lambda_embed_dim: int = 4,
+        interval_embed_dim: int = 0,  # 0 = disabled (backward compatible)
+        c_embed_dim: int = 0,         # 0 = disabled; projected from pooled prompt embeds
+        c_input_dim: int = 2048,      # SD3 pooled prompt embed dim (CLIP-L 768 + CLIP-G 1280)
         # Normalizations applied before embedding
-        t_embed_normalization: float = 1e3,  # legacy; ignored when num_timesteps is set
+        t_embed_normalization: float = 1e3,  # SD3 timesteps are [0, 1000], so t/1000 → [0, 1]
         delta_embed_normalization: float = 5.0,
         # Number of denoising steps (T); timestep input is normalized as t/T
         num_timesteps: int = None,
@@ -32,7 +35,7 @@ class ScalarMLP(nn.Module):
     ) -> None:
         super().__init__()
 
-        input_size = t_embed_dim + delta_embed_dim + lambda_embed_dim
+        input_size = t_embed_dim + delta_embed_dim + lambda_embed_dim + interval_embed_dim + c_embed_dim
 
         # Head
         layers = [nn.Linear(input_size, hidden_size), nn.ReLU()]
@@ -41,13 +44,18 @@ class ScalarMLP(nn.Module):
         layers += [nn.Linear(hidden_size, output_size)]
         self.combined_head = nn.Sequential(*layers)
 
+        # Prompt projection (only when c_embed_dim > 0)
+        self.c_proj = nn.Linear(c_input_dim, c_embed_dim) if c_embed_dim > 0 else None
+
         # Config
         self.t_embed_dim = t_embed_dim
         self.delta_embed_dim = delta_embed_dim
         self.lambda_embed_dim = lambda_embed_dim
+        self.interval_embed_dim = interval_embed_dim
+        self.c_embed_dim = c_embed_dim
 
-        # Use num_timesteps for normalization if provided, else fall back to legacy
-        self.t_embed_normalization = float(num_timesteps) if num_timesteps is not None else t_embed_normalization
+        # Always normalize timesteps to [0, 1] via t/1000 (SD3 timesteps are in [0, 1000])
+        self.t_embed_normalization = t_embed_normalization
         self.delta_embed_normalization = delta_embed_normalization
 
         self.w_bias = w_bias
@@ -80,6 +88,8 @@ class ScalarMLP(nn.Module):
         l: Union[float, int, torch.Tensor],
         noise_pred_uncond: torch.Tensor,
         noise_pred_text: torch.Tensor,
+        interval: Union[float, int, torch.Tensor] = 0.0,
+        c_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -87,6 +97,10 @@ class ScalarMLP(nn.Module):
             l:        scalar or (B,)
             noise_pred_uncond: (B, C, H, W)
             noise_pred_text:   (B, C, H, W)
+            interval: (t-s)/T normalized interval length, scalar or (B,).
+                      Only used when interval_embed_dim > 0; ignored otherwise.
+            c_emb:    (B, c_input_dim) pooled prompt embeddings.
+                      Only used when c_embed_dim > 0; ignored otherwise.
 
         Returns:
             guidance_scales: (B,) if output_size==1 else (B, output_size)
@@ -106,7 +120,18 @@ class ScalarMLP(nn.Module):
         d_feat = self._embed_value(delta_norm / self.delta_embed_normalization, self.delta_embed_dim) # (B, delta_embed_dim)
         l_feat = self._embed_value(l, self.lambda_embed_dim)        # (B, lambda_embed_dim)
 
-        features = torch.cat([t_feat, d_feat, l_feat], dim=-1)  # (B, input_size)
+        parts = [t_feat, d_feat, l_feat]
+
+        if self.interval_embed_dim > 0:
+            interval = self._ensure_batched(interval, B, device, dtype)
+            iv_feat = self._embed_value(interval, self.interval_embed_dim)  # (B, interval_embed_dim)
+            parts.append(iv_feat)
+
+        if self.c_proj is not None and c_emb is not None:
+            c_feat = self.c_proj(c_emb.to(dtype=dtype, device=device))  # (B, c_embed_dim)
+            parts.append(c_feat)
+
+        features = torch.cat(parts, dim=-1)  # (B, input_size)
 
         # 4) Head → scales
         guidance_scale = self.combined_head(features)                   # (B, output_size)

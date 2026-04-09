@@ -1,7 +1,7 @@
 seed: 42
 diffusion:
   model_id: stabilityai/stable-diffusion-3-medium-diffusers
-  num_timesteps: 10
+  num_timesteps: 20
   vanilla_cfg: 0
   scheduler_kwargs:
     beta_start: 0.00085
@@ -20,13 +20,20 @@ guidance_scale_model:
   lambda_embed_dim: 4
   delta_embed_dim: 4
   t_embed_dim: 4
-  t_embed_normalization: 1000
+  interval_embed_dim: 4
+  c_embed_dim: 4
+  c_input_dim: 2048
   delta_embed_normalization: 1.0
+  t_embed_normalization: 1000
   w_scale: 1
   w_bias: 1
 
+fsg:
+  enabled: true
+  sc_weight: 0.1
+
 training:
-  label: ema_no_dnorm_steps10
+  label: fsg_steps20
   save_interval: 200
   max_steps: 20000
   batch_size: 1
