@@ -58,7 +58,13 @@ def init_training(config, guidance_model=None, n_samples=None):
     _guidance_model_ref = guidance_model
     _train_start_time = time.time()
     _last_step_time = _train_start_time
-    _max_steps = config["training"]["max_steps"]
+    max_images = config["training"].get("max_images")
+    if max_images is None:
+        max_images = config["training"].get("max_steps")
+    if max_images is None:
+        raise KeyError("training.max_images (or legacy training.max_steps) must be set")
+    global_batch_size = config["training"]["batch_size"] * int(os.environ.get("WORLD_SIZE", 1))
+    _max_steps = max(1, (max_images + global_batch_size - 1) // global_batch_size)
     _loss_ema = None
     _step_times = []
     _train_guidance_data = []
@@ -95,7 +101,7 @@ def init_training(config, guidance_model=None, n_samples=None):
         settings=wandb.Settings(start_method="thread"),
         config={
             "model_id": config["diffusion"]["model_id"],
-            "max_steps": config["training"]["max_steps"],
+            "max_images": max_images,
             "batch_size": config["training"]["batch_size"],
             "lr": config["training"]["optimizer_kwargs"].get("lr"),
             "weight_decay": config["training"]["optimizer_kwargs"].get("weight_decay"),

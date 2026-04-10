@@ -56,6 +56,7 @@ export WANDB_CACHE_DIR="$TMP_ROOT/wandb_cache"
 export WANDB_DATA_DIR="$TMP_ROOT/wandb_data"
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR"
 export WANDB__REQUIRE_SERVICE=false
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 export PYTHONUNBUFFERED=1
 

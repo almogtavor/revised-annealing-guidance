@@ -23,16 +23,30 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
     if forward_fn is None:
         forward_fn = forward_pass
     train_config = config['training']
-    max_steps = min(train_config['max_steps'], len(dataloader))
-    max_epochs = math.ceil(max_steps / len(dataloader))
+    max_images = train_config.get('max_images')
+    if max_images is None:
+        max_images = train_config.get('max_steps')
+    if max_images is None:
+        raise KeyError("training.max_images (or legacy training.max_steps) must be set")
     accumulation_steps = max(train_config.get('accumulation_steps', 1), 1)
     grad_clip = train_config.get('grad_clip', 1.0)
+    global_batch_size = train_config.get('batch_size', 1) * int(os.environ.get("WORLD_SIZE", 1))
+    max_steps = math.ceil(max_images / global_batch_size)
+    max_epochs = math.ceil(max_steps / len(dataloader))
 
     train_end = False
     global_step = 0
+    last_saved_step = 0
     nan_count = 0
 
     datetime_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if resume_step * global_batch_size >= max_images:
+        print(
+            f"Resume checkpoint already reached target ({resume_step * global_batch_size} >= {max_images} global images); exiting.",
+            flush=True,
+        )
+        return
 
     for epoch in range(max_epochs):
         if hasattr(dataloader, 'distributed_sampler'):
@@ -48,6 +62,8 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
                 global_step += 1
                 continue
 
+            completed_step = global_step + 1
+
             result = forward_fn(config, pipeline, model, images, prompts)
             if isinstance(result, dict):
                 loss = result['loss']
@@ -60,27 +76,36 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
             if torch.isnan(loss) or torch.isinf(loss):
                 nan_count += 1
                 if nan_count % 10 == 1:
-                    print(f"WARNING: NaN/Inf loss at step {global_step} (total skipped: {nan_count})", flush=True)
+                    print(f"WARNING: NaN/Inf loss at step {completed_step} (total skipped: {nan_count})", flush=True)
                 optimizer.zero_grad()
-                global_step += 1
+                global_step = completed_step
                 continue
 
             loss = loss / accumulation_steps  # Normalize loss by accumulation steps
             loss.backward()
-            wb.log_train(global_step, loss.item() * accumulation_steps, model, extra_metrics=extra_metrics)
+            wb.log_train(completed_step, loss.item() * accumulation_steps, model, extra_metrics=extra_metrics)
 
-            if (global_step + 1) % accumulation_steps == 0:
+            if completed_step % accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if global_step > 0 and global_step % config['training']['save_interval'] == 0:
-                print(f"Saving model at step {global_step}...")
-                resume_utils.save_checkpoint(config, model, optimizer, global_step, datetime_timestamp)
+            if completed_step % config['training']['save_interval'] == 0:
+                samples_seen = completed_step * global_batch_size
+                print(f"Saving model at {samples_seen} global images (iter {completed_step})...")
+                resume_utils.save_checkpoint(
+                    config,
+                    model,
+                    optimizer,
+                    completed_step,
+                    datetime_timestamp,
+                    display_step=samples_seen,
+                    global_samples_seen=samples_seen,
+                )
+                last_saved_step = completed_step
 
-
-            global_step += 1
-            if global_step > max_steps:
+            global_step = completed_step
+            if completed_step * global_batch_size >= max_images:
                 train_end = True
                 break
 
@@ -92,6 +117,19 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
         print(
             f"Epoch {epoch + 1}/{max_epochs} finished in {epoch_seconds:.1f}s (global_step={global_step})",
             flush=True,
+        )
+
+    if global_step > 0 and global_step != last_saved_step:
+        samples_seen = global_step * global_batch_size
+        print(f"Saving final model at {samples_seen} global images (iter {global_step})...")
+        resume_utils.save_checkpoint(
+            config,
+            model,
+            optimizer,
+            global_step,
+            datetime_timestamp,
+            display_step=samples_seen,
+            global_samples_seen=samples_seen,
         )
 
 
@@ -220,10 +258,10 @@ def forward_pass_sd3(
     v_guided = vu + w * (vt - vu)
 
     use_vanilla_cfg = bool(config['diffusion'].get('vanilla_cfg', 0))
-    # Explicit flow-matching step (differentiable through w for both CFG variants).
-    n_steps = train_utils_sd3.get_num_sampling_steps(config, default=50)
+    # Match the original repo: step on the scheduler's discrete timestep grid.
+    t_next = train_utils_sd3.get_prev_timestep(pipeline.scheduler, timestep)
     st = (timestep.float() / 1000.0).to(device=noisy_latents.device)
-    st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
+    st1 = (t_next.float() / 1000.0).to(device=noisy_latents.device)
     st_, st1_ = st.view(-1, 1, 1, 1), st1.view(-1, 1, 1, 1)
     zf = noisy_latents.float()
     x0 = zf - st_ * v_guided
@@ -231,10 +269,6 @@ def forward_pass_sd3(
     z_next = (1.0 - st1_) * x0 + st1_ * eps_u
 
     # Pass 2: direct delta loss (full backprop through frozen transformer)
-    n_steps = train_utils_sd3.get_num_sampling_steps(config, default=50)
-    st = (timestep.float() / 1000.0).to(device=noisy_latents.device)
-    st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
-    t_next = (st1 * 1000.0).to(dtype=timestep.dtype, device=timestep.device)
     del x0, eps_u, zf
     torch.cuda.empty_cache()
 
@@ -281,15 +315,20 @@ else:
 guidance_scale_network = ddp_utils.wrap(guidance_scale_network)
 
 # Optional overrides (useful for SLURM sanity-check runs)
-_env_max_steps = os.environ.get("ANNEALING_GUIDANCE_MAX_STEPS")
-if _env_max_steps:
+_env_max_images = os.environ.get("ANNEALING_GUIDANCE_MAX_IMAGES") or os.environ.get("ANNEALING_GUIDANCE_MAX_STEPS")
+if _env_max_images:
     config.setdefault("training", {})
-    config["training"]["max_steps"] = int(_env_max_steps)
+    config["training"]["max_images"] = int(_env_max_images)
 
 _env_save_interval = os.environ.get("ANNEALING_GUIDANCE_SAVE_INTERVAL")
 if _env_save_interval:
     config.setdefault("training", {})
     config["training"]["save_interval"] = int(_env_save_interval)
+
+_env_resume_from = os.environ.get("ANNEALING_GUIDANCE_RESUME_FROM")
+if _env_resume_from:
+    config.setdefault("training", {})
+    config["training"]["resume_from"] = _env_resume_from
 
 print("Models/pipeline loaded; building optimizer and dataloader...", flush=True)
 

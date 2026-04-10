@@ -30,7 +30,7 @@ guidance_scale_model:
 training:
   fixed_lambda: 1.0  # lambda=1 => only delta loss => w should explode
   save_interval: 200
-  max_steps: 10000
+  max_images: 10000
   batch_size: 1
   accumulation_steps: 16
   out_dir: ./output/sanity_delta_only_v2

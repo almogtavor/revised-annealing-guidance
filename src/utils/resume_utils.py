@@ -31,18 +31,25 @@ def maybe_resume(config, model, optimizer=None):
         print("  Restored optimizer state.", flush=True)
 
     step = ckpt.get('step', 0)
-    print(f"  Resuming from step {step}.", flush=True)
+    samples_seen = ckpt.get('global_samples_seen')
+    if samples_seen is not None:
+        print(f"  Resuming from step {step} ({samples_seen} global images).", flush=True)
+    else:
+        print(f"  Resuming from step {step}.", flush=True)
     return step
 
 
-def save_checkpoint(config, model, optimizer, step, timestamp):
+def save_checkpoint(config, model, optimizer, step, timestamp, display_step=None, global_samples_seen=None):
     """Save checkpoint with optimizer state for resumption."""
     out_dir = config['training']['out_dir']
     checkpoint_dir = f'{out_dir}/checkpoints_{timestamp}'
     os.makedirs(checkpoint_dir, exist_ok=True)
+    filename_step = int(display_step if display_step is not None else step)
     torch.save({
         'config': config,
         'guidance_scale_model': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'step': step,
-    }, f'{checkpoint_dir}/checkpoint_step_{step}.pt')
+        'display_step': filename_step,
+        'global_samples_seen': global_samples_seen,
+    }, f'{checkpoint_dir}/checkpoint_step_{filename_step}.pt')

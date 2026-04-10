@@ -99,11 +99,11 @@ def _patch_checkpoint():
     _orig_save = resume_utils.save_checkpoint
     _orig_resume = resume_utils.maybe_resume
 
-    def _ddp_save(config, model, optimizer, step, timestamp):
+    def _ddp_save(config, model, optimizer, step, timestamp, *args, **kwargs):
         if not is_main():
             return
         raw = model.module if hasattr(model, "module") else model
-        _orig_save(config, raw, optimizer, step, timestamp)
+        _orig_save(config, raw, optimizer, step, timestamp, *args, **kwargs)
 
     def _ddp_resume(config, model, optimizer=None):
         global _skip_remaining

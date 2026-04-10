@@ -8,6 +8,7 @@ Training is split 50/50 between FSG-aligned and regular one-step modes.
 """
 
 import torch
+import torch.distributed as dist
 import src.utils.train_utils as train_utils
 import src.utils.train_utils_sd3 as train_utils_sd3
 
@@ -16,7 +17,28 @@ import src.utils.train_utils_sd3 as train_utils_sd3
 FSG_DELTA_FRAC = 0.125     # Δ/T
 FSG_NUM_SITES = 3          # first 3 sites
 FSG_ITERATIONS = [3, 2, 2] # K per site
-FSG_SC_WEIGHT = 0.1        # self-consistency loss weight
+FSG_SC_WEIGHT = 0.1        # self-consistency MMD weight
+
+
+def _gather_particles(x, keep_grad=False):
+    if not dist.is_available() or not dist.is_initialized():
+        return x
+    gathered = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered, x.detach())
+    if keep_grad:
+        gathered[dist.get_rank()] = x
+    return torch.cat(gathered, dim=0)
+
+
+def _energy_mmd(x, y):
+    """Mini-batch MMD with the paper's energy kernel k(x, y) = -||x-y||_2."""
+    x = _gather_particles(x.float(), keep_grad=True).flatten(1)
+    y = _gather_particles(y.float()).flatten(1)
+
+    cross = torch.cdist(x, y).mean()
+    same_x = torch.cdist(x, x).mean()
+    same_y = torch.cdist(y, y).mean()
+    return 2.0 * cross - same_x - same_y
 
 
 def get_fsg_sites(T):
@@ -203,11 +225,10 @@ def forward_pass_fsg(config, pipeline, model, images, prompts):
                 pipeline, z_t_refined.to(dtype), pe_snap, ppe_snap, t_snapped)
         vu_final, vt_final = pred_final.float().chunk(2)
 
-        # Compute t_next for the final calibration step
-        n_steps = T
+        # Match training/inference to the scheduler's discrete timestep grid.
+        t_next_val = train_utils_sd3.get_prev_timestep(pipeline.scheduler, t_snapped)
         st = (t_snapped.float() / 1000.0).to(device=z_t_refined.device)
-        st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
-        t_next_val = (st1.view(-1) * 1000.0).to(dtype=t_snapped.dtype, device=t_snapped.device)
+        st1 = (t_next_val.float() / 1000.0).to(device=z_t_refined.device)
         interval = (t_snapped.float() - t_next_val.float()) / 1000.0  # (t - s) / t_embed_normalization
 
         w_final = model(t_snapped.float(), lam, vu_final, vt_final, interval=interval, c_emb=c_emb)
@@ -232,9 +253,8 @@ def forward_pass_fsg(config, pipeline, model, images, prompts):
         loss = train_utils.calc_loss(v_guided, velocity_gt_snapped.float(), delta, lam,
                                      ema_normalize=ema_normalize)
 
-        # Self-consistency loss: z_t_refined should be close to original noisy_latents_snapped
-        # (the FSG loop should refine but not drift)
-        sc_loss = ((z_t_refined.float() - noisy_latents_snapped.float()) ** 2).mean()
+        # Self-consistency on the final FSG iterate: match guided and noised site marginals.
+        sc_loss = _energy_mmd(z_t_refined, noisy_latents_snapped)
         loss = loss + sc_weight * sc_loss
 
         eps_val = ((1 - lam) * ((v_guided - velocity_gt_snapped.float()) ** 2).mean(dim=[1, 2, 3])).mean()
@@ -264,11 +284,10 @@ def forward_pass_fsg(config, pipeline, model, images, prompts):
         vu, vt = pred.float().chunk(2)
         del pred
 
-        # Compute t_next first so we can pass (t - t_next) / 1000 to the MLP
-        n_steps = T
+        # Use the scheduler's actual previous timestep, not a uniform 1/T decrement.
+        t_next = train_utils_sd3.get_prev_timestep(pipeline.scheduler, timestep)
         st = (timestep.float() / 1000.0).to(device=noisy_latents.device)
-        st1 = (st - 1.0 / n_steps).clamp(min=1e-4)
-        t_next = (st1.view(-1) * 1000.0).to(dtype=timestep.dtype, device=timestep.device)
+        st1 = (t_next.float() / 1000.0).to(device=noisy_latents.device)
         interval = (timestep.float() - t_next.float()) / 1000.0  # (t - s) / t_embed_normalization
 
         w = model(timestep.float(), lam, vu, vt, interval=interval, c_emb=c_emb)

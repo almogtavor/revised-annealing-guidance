@@ -58,24 +58,19 @@ def load_pipeline_and_model(checkpoint_path, device, dtype):
     print(f"Loading guidance model from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    model_cfg = checkpoint.get('model_config') \
+    model_cfg = dict(
+        checkpoint.get('model_config')
         or checkpoint.get('config', {}).get('guidance_scale_model', {})
+    )
     state_dict = checkpoint.get('model_state_dict') \
         or checkpoint.get('guidance_scale_model')
 
-    guidance_scale_model = ScalarMLP(
-        hidden_size=model_cfg.get('hidden_size', 128),
-        output_size=model_cfg.get('output_size', 1),
-        n_layers=model_cfg.get('n_layers', 2),
-        t_embed_dim=model_cfg.get('t_embed_dim', 4),
-        delta_embed_dim=model_cfg.get('delta_embed_dim', 4),
-        lambda_embed_dim=model_cfg.get('lambda_embed_dim', 4),
-        t_embed_normalization=model_cfg.get('t_embed_normalization', 1e3),
-        num_timesteps=model_cfg.get('num_timesteps') or checkpoint.get('config', {}).get('diffusion', {}).get('num_sampling_steps') or checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps'),
-        delta_embed_normalization=model_cfg.get('delta_embed_normalization', 5.0),
-        w_bias=model_cfg.get('w_bias', 1.0),
-        w_scale=model_cfg.get('w_scale', 1.0),
-    ).to(device, dtype=torch.float32)
+    model_cfg.setdefault(
+        'num_timesteps',
+        checkpoint.get('config', {}).get('diffusion', {}).get('num_sampling_steps')
+        or checkpoint.get('config', {}).get('diffusion', {}).get('num_timesteps')
+    )
+    guidance_scale_model = ScalarMLP(**model_cfg).to(device, dtype=torch.float32)
 
     guidance_scale_model.load_state_dict(state_dict, strict=True)
     guidance_scale_model.eval()

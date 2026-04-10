@@ -88,3 +88,4 @@ tests/
 .claude/
 arXiv-2510.21512v1_towards_a_golden_cfg_path_via_fs_fixed_point_iterations/
 arXiv-2506.24108v1_annealing_guidance_scale/
+arXiv-2510.00815v1_learn_to_guide_your_diffusion_models/

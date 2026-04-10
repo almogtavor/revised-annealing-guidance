@@ -190,7 +190,8 @@ def generate_single(pipeline, prompt, seed, device, guidance_scale,
     use_annealing = guidance_scale_model is not None and guidance_lambda is not None
 
     if use_apg:
-        return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator)
+        with torch.inference_mode():
+            return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator)
 
     kwargs = dict(
         guidance_scale=guidance_scale,
@@ -207,7 +208,8 @@ def generate_single(pipeline, prompt, seed, device, guidance_scale,
             kwargs["use_fsg"] = True
             kwargs["fsg_iterations"] = fsg_iterations
 
-    return pipeline(**kwargs).images[0]
+    with torch.inference_mode():
+        return pipeline(**kwargs).images[0]
 
 
 def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
@@ -223,46 +225,8 @@ def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
 
     # Simpler approach: use the pipeline normally but with a hook that replaces
     # the guidance combination.
-    import types
-
-    original_call = pipeline.__class__.__call__
-
-    # We need to modify the denoising loop. Since our pipeline already has
-    # the guidance logic in __call__, let's patch it at the guidance step.
-    # Looking at the pipeline code, after noise_pred_uncond, noise_pred_text = noise_pred.chunk(2),
-    # it does: noise_pred = uncond + scale * (text - uncond)
-    # For APG we want: noise_pred = uncond + scale * perp_component(text - uncond, uncond)
-
-    _apg_scale = guidance_scale
-
-    # Patch: intercept the point where guidance is applied
-    # We'll use a hook on the transformer that captures the split predictions
-    # Actually, the simplest way: just call with standard CFG and accept the difference.
-    # But that defeats the purpose. Let me use a proper approach.
-
-    # The pipeline's __call__ has this block:
-    #   noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-    # For APG we replace this with the perpendicular projection.
-    # We can temporarily replace self._guidance_scale and add a post-processing hook.
-
-    # Actually, looking at the pipeline code more carefully:
-    # Line 256: noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-    # This is only reached when _use_cfgpp_step is False (standard CFG path).
-    # So for APG, we go through the standard CFG path but we need to modify the combination.
-
-    # Cleanest approach: temporarily monkey-patch the guidance combination
-    # by wrapping the transformer forward to apply APG post-guidance.
-
-    # Let's just directly modify noise_pred after the standard CFG computation.
-    # We'll do this by using a step callback.
-
-    # Unfortunately SD3 pipeline callback_on_step_end happens after the scheduler step,
-    # so we can't intercept guidance there. Let's just patch the transformer.
-
     # SIMPLEST: run the denoising loop manually, matching the pipeline's logic.
     # This is what the paper likely did too.
-
-    from src.pipelines.my_pipeline_stable_diffusion3 import MyStableDiffusion3Pipeline
 
     # Encode prompt
     (
@@ -315,6 +279,7 @@ def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
         noise_pred = apg_guidance(noise_pred_uncond, noise_pred_text, guidance_scale)
 
         latents = pipeline.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+        del noise_pred_uncond, noise_pred_text, noise_pred
 
     # Decode
     latents = (latents / pipeline.vae.config.scaling_factor) + pipeline.vae.config.shift_factor

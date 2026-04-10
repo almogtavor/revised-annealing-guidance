@@ -28,7 +28,7 @@ guidance_scale_model:
 training:
   label: ema_no_dnorm
   save_interval: 200
-  max_steps: 20000
+  max_images: 20000
   batch_size: 1
   accumulation_steps: 16
   out_dir: ./output

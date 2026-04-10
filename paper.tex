@@ -1,0 +1,831 @@
+%%
+%% This is file `sample-acmtog.tex',
+%% generated with the docstrip utility.
+%%
+%% The original source files were:
+%%
+%% samples.dtx  (with options: `all,journal,bibtex,acmtog')
+%% 
+%% IMPORTANT NOTICE:
+%% 
+%% For the copyright see the source file.
+%% 
+%% Any modified versions of this file must be renamed
+%% with new filenames distinct from sample-acmtog.tex.
+%% 
+%% For distribution of the original source see the terms
+%% for copying and modification in the file samples.dtx.
+%% 
+%% This generated file may be distributed as long as the
+%% original source files, as listed above, are part of the
+%% same distribution. (The sources need not necessarily be
+%% in the same archive or directory.)
+%%
+%%
+%% Commands for TeXCount
+%TC:macro \cite [option:text,text]
+%TC:macro \citep [option:text,text]
+%TC:macro \citet [option:text,text]
+%TC:envir table 0 1
+%TC:envir table* 0 1
+%TC:envir tabular [ignore] word
+%TC:envir displaymath 0 word
+%TC:envir math 0 word
+%TC:envir comment 0 0
+%%
+%% The first command in your LaTeX source must be the \documentclass
+%% command.
+%%
+%% For submission and review of your manuscript please change the
+%% command to \documentclass[manuscript, screen, review]{acmart}.
+%%
+%% When submitting camera ready or to TAPS, please change the command
+%% to \documentclass[sigconf]{acmart} or whichever template is required
+%% for your publication.
+%%
+%%
+\documentclass[acmtog]{acmart}
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{booktabs} % for professional tables
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{placeins}
+\usepackage[ruled,vlined]{algorithm2e}
+% hyperref makes hyperlinks in the resulting PDF.
+% If your build breaks (sometimes temporarily if a hyperlink spans a page)
+% please comment out the following usepackage line and replace
+% \usepackage{icml2025} with \usepackage[nohyperref]{icml2025} above.
+\usepackage{hyperref}
+
+% Attempt to make hyperref and algorithmic work together better:
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+\newcommand{\almg}{\textcolor{red}{\mathbb{almg}}}
+\newcommand{\tal}{\textcolor{blue}{\mathbb{tal}}}
+\newcommand{\orz}{\textcolor{green}{\mathbb{orz}}}
+%% Rights management information.  This information is sent to you
+%% when you complete the rights form.  These commands have SAMPLE
+%% values in them; it is your responsibility as an author to replace
+%% the commands and values with those provided to you when you
+%% complete the rights form.
+\setcopyright{acmlicensed}
+\copyrightyear{2018}
+\acmYear{2018}
+\acmDOI{XXXXXXX.XXXXXXX}
+
+%%
+%% These commands are for a JOURNAL article.
+% \acmJournal{TOG}
+% \acmVolume{37}
+% \acmNumber{4}
+% \acmArticle{111}
+% \acmMonth{8}
+
+%%
+%% Submission ID.
+%% Use this when submitting an article to a sponsored event. You'll
+%% receive a unique submission ID from the organizers
+%% of the event, and this ID should be used as the parameter to this command.
+%%\acmSubmissionID{123-A56-BU3}
+
+%%
+%% For managing citations, it is recommended to use bibliography
+%% files in BibTeX format.
+%%
+%% You can then either use BibTeX with the ACM-Reference-Format style,
+%% or BibLaTeX with the acmnumeric or acmauthoryear sytles, that include
+%% support for advanced citation of software artefact from the
+%% biblatex-software package, also separately available on CTAN.
+%%
+%% Look at the sample-*-biblatex.tex files for templates showcasing
+%% the biblatex styles.
+%%
+
+%%
+%% The majority of ACM publications use numbered citations and
+%% references.  The command \citestyle{authoryear} switches to the
+%% "author year" style.
+%%
+%% If you are preparing content for an event
+%% sponsored by ACM SIGGRAPH, you must use the "author year" style of
+%% citations and references.
+\citestyle{acmauthoryear}
+
+
+%%
+%% end of the preamble, start of the body of the document source.
+\begin{document}
+
+%%
+%% The "title" command has an optional parameter,
+%% allowing the author to define a "short title" to be used in page headers.
+\title{Flow Matching with Annealing Guidance Scale}
+
+%%
+%% The "author" command and its associated commands are used to define
+%% the authors and their affiliations.
+%% Of note is the shared affiliation of the first two authors, and the
+%% "authornote" and "authornotemark" commands
+%% used to denote shared contribution to the research.
+\author{Tal Malka}
+\affiliation{%
+  \institution{Tel Aviv University}
+  \city{Tel Aviv}
+  \country{Israel}}
+\email{larst@affiliation.org}
+
+
+\author{Or Bar Zur}
+\affiliation{%
+  \institution{Tel Aviv University}
+  \city{Tel Aviv}
+  \country{Israel}}
+\email{jsmith@affiliation.org}
+
+\author{Almog Tavor}
+\affiliation{%
+  \institution{Tel Aviv University}
+  \city{Tel Aviv}
+  \country{Israel}}
+\email{almogt@mail.tau.ac.il}
+
+%%
+%% By default, the full list of authors will be used in the page
+%% headers. Often, this list is too long, and will overlap
+%% other information printed in the page headers. This command allows
+%% the author to define a more concise list
+%% of authors' names for this purpose.
+\renewcommand{\shortauthors}{Trovato et al.}
+
+%%
+%% The abstract is a short summary of the work to be presented in the
+%% article.
+\begin{abstract}
+Classifier-free guidance, a dominant tool for steering text-to-image diffusion models, is typically left to a single hand-picked scalar that ignores both the local denoising regime and the prompt. We adapt the diffusion-based annealing guidance scale scheduler of \citet{dahary2025annealing} to flow-matching transformers and extend it with a geometry-driven auto-$\lambda$, a Foresight-Guidance fixed-point operator at the early denoising stages, and a prompt and interval-aware training mode that makes the scheduler aware of the FSG calibration sites.
+\end{abstract}
+
+%%
+%% The code below is generated by the tool at http://dl.acm.org/ccs.cfm.
+%% Please copy and paste the code instead of the example below.
+%%
+% \begin{CCSXML}
+% <ccs2012>
+%  <concept>
+%   <concept_id>00000000.0000000.0000000</concept_id>
+%   <concept_desc>Do Not Use This Code, Generate the Correct Terms for Your Paper</concept_desc>
+%   <concept_significance>500</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>00000000.00000000.00000000</concept_id>
+%   <concept_desc>Do Not Use This Code, Generate the Correct Terms for Your Paper</concept_desc>
+%   <concept_significance>300</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>00000000.00000000.00000000</concept_id>
+%   <concept_desc>Do Not Use This Code, Generate the Correct Terms for Your Paper</concept_desc>
+%   <concept_significance>100</concept_significance>
+%  </concept>
+%  <concept>
+%   <concept_id>00000000.00000000.00000000</concept_id>
+%   <concept_desc>Do Not Use This Code, Generate the Correct Terms for Your Paper</concept_desc>
+%   <concept_significance>100</concept_significance>
+%  </concept>
+% </ccs2012>
+% \end{CCSXML}
+
+% \ccsdesc[500]{Do Not Use This Code~Generate the Correct Terms for Your Paper}
+% \ccsdesc[300]{Do Not Use This Code~Generate the Correct Terms for Your Paper}
+% \ccsdesc{Do Not Use This Code~Generate the Correct Terms for Your Paper}
+% \ccsdesc[100]{Do Not Use This Code~Generate the Correct Terms for Your Paper}
+
+%%
+%% Keywords. The author(s) should pick words that accurately describe
+%% the work being presented. Separate the keywords with commas.
+% \keywords{Do, Not, Use, This, Code, Put, the, Correct, Terms, for,
+%   Your, Paper}
+
+% \received{20 February 2007}
+% \received[revised]{12 March 2009}
+% \received[accepted]{5 June 2009}
+
+%%
+%% This command processes the author and affiliation and title
+%% information and builds the first part of the formatted document.
+\maketitle
+
+\section{Introduction}
+Classifier-free guidance is the dominant tool for steering text-to-image models.
+However, its guidance scale is typically left to a single hand-picked scalar that ignores the local denoising regime and the prompt itself.
+Building on the annealing scheduler of \citet{dahary2025annealing}, this work ports the method to flow-matching transformers (Stable Diffusion 3).
+We then extend it along three axes: a geometry-driven \emph{auto-$\lambda$} that removes the manual quality--adherence knob at inference, a fixed-point Foresight Guidance (FSG) operator at the early denoising stages, and an extended training mode in which the scheduler is jointly aware of the FSG calibration sites and conditioned on the prompt embedding.
+
+\begin{algorithm}[t]
+\caption{CFG++ Inference with Annealing Guidance (Flow Matching / SD3)}
+\KwIn{
+$T$: total number of integration steps;\\
+$w_\theta(t,\delta_t,\lambda)$: learned annealing scheduler;\\
+$c$: condition
+}
+
+Initialize $z_T \sim \mathcal{N}(0, I)$\;
+
+\For{$t = T$ \KwTo $1$}{
+$v_t^{\varnothing} = v(z_t,t,\varnothing)$,\quad $v_t^{c} = v(z_t,t,c)$\;
+$\delta_t = v_t^{c} - v_t^{\varnothing}$\;
+$\hat{v}_t = v_t^{\varnothing} + w_\theta(t/ 1000,\delta_t,\lambda)\,\delta_t$ \tcp*[r]{Annealed guidance}
+$z_{0|t} = z_t - \sigma_t \hat{v}_t$ \tcp*[r]{Guided signal estimate}
+$\epsilon_t^{\varnothing} = z_t + (1-\sigma_t) v_t^{\varnothing}$ \tcp*[r]{Unconditional noise}
+$z_{t-1} = (1-\sigma_{t-1}) z_{0|t} + \sigma_{t-1} \epsilon_t^{\varnothing}$ \tcp*[r]{CFG++ step}
+}
+
+\KwRet{$z_0$}
+\end{algorithm}
+
+
+\section{Background and Related Work}
+We build directly on \citet{dahary2025annealing}, who introduce a tiny scheduler $w_\theta(t,\|\delta_t\|,\lambda)$ trained against an EMA-balanced $\delta$/$\epsilon$ loss to anneal the CFG++ guidance scale per step.
+\citet{fsg2025} (NeurIPS 2025) reframe guidance as fixed-point iteration and show that the early denoising stages dominate quality, motivating their Foresight Guidance (FSG) operator that performs a small number of repeated long-interval calibrations at a few early sites; we adopt their FSG inference operator on top of the annealing scheduler.
+\citet{learn2guide2025} introduce a self-consistency MMD objective on the guided iterates, which we integrate on the \emph{final} FSG iterate so the MLP learns to be calibrated under FSG; following both works, we also extend the MLP input with a normalized interval $(t-s)/T$ and a projected pooled prompt embedding $c_{\text{emb}}$.
+
+\section{Adapting the Method to Flow-Matching Transformers}
+
+Porting the proposed method from a DDPM-based UNet (SDXL) to a flow-matching transformer (Stable Diffusion 3 Medium) required several non-trivial modifications. While the high-level structure of the algorithm remains unchanged, the underlying parameterization, sampling dynamics, and memory constraints differ substantially. Below, we describe the key necessary adaptations.
+
+\subsection{CFG++ Renormalization under Flow Matching}
+
+In DDPM/DDIM, the clean-image estimate is recovered from the predicted noise using the variance schedule. In the original DDIM formulation used in \citep{dahary2025annealing}, the estimate is obtained by subtracting the predicted noise component from the noisy latent:
+\begin{equation}
+z_0^{\text{DDIM}} =
+\frac{z_t - \sqrt{1 - \bar{\alpha}_t}\,\hat{\epsilon}_t}{\sqrt{\bar{\alpha}_t}}.
+\end{equation}
+The key operation is the subtraction of the noise contribution from $z_t$. Since the forward diffusion process is
+\begin{equation}
+z_t = \sqrt{\bar{\alpha}_t}\,z_0 + \sqrt{1-\bar{\alpha}_t}\,\epsilon,
+\end{equation}
+subtracting the noise term $\sqrt{1-\bar{\alpha}_t}\,\epsilon$ removes the stochastic component and leaves only the scaled clean signal, which is then rescaled by $1/\sqrt{\bar{\alpha}_t}$ to recover $z_0$.
+
+\medskip
+
+Flow-matching models use a different parameterization of the forward process:
+\begin{equation}
+z_t = (1 - \sigma_t) z_0 + \sigma_t \epsilon,
+\end{equation}
+and the model predicts velocity
+\begin{equation}
+v = \epsilon - z_0.
+\end{equation}
+
+Substituting $\epsilon = v + z_0$ into the forward equation gives
+\begin{equation}
+z_t = (1 - \sigma_t)z_0 + \sigma_t(v + z_0)
+     = z_0 + \sigma_t v.
+\end{equation}
+
+Rearranging immediately yields the clean-image estimate
+\begin{equation}
+z_0 = z_t - \sigma_t v.
+\end{equation}
+
+\paragraph{Interpretation.}
+This subtraction plays the exact same role as in DDIM: it removes the noise-dependent component from $z_t$.
+In DDIM we subtract $\sqrt{1-\bar{\alpha}_t}\,\epsilon$;
+in flow matching we subtract $\sigma_t v$.
+Both isolate the clean signal from the noisy latent.
+
+\medskip
+
+Thus, the guided estimate becomes
+\begin{equation}
+z_{0|t} = z_t - \sigma_t \hat{v}_t.
+\end{equation}
+
+To preserve the CFG++ renoising structure, the noise direction must be reconstructed from the unconditional prediction. Starting from
+\begin{equation}
+z_t = (1 - \sigma_t)z_0 + \sigma_t\epsilon,
+\end{equation}
+and substituting the unconditional clean estimate
+\begin{equation}
+z_0 = z_t - \sigma_t v_t^{\varnothing},
+\end{equation}
+we obtain
+\begin{equation}
+\begin{aligned}
+\epsilon_t^{\varnothing}
+&=
+\frac{z_t - (1-\sigma_t)(z_t - \sigma_t v_t^{\varnothing})}{\sigma_t} \\
+&=
+\frac{z_t - (1-\sigma_t)z_t + (1-\sigma_t)\sigma_t v_t^{\varnothing}}{\sigma_t} \\
+&=
+\frac{\sigma_t z_t + (1-\sigma_t)\sigma_t v_t^{\varnothing}}{\sigma_t} \\
+&=
+z_t + (1-\sigma_t)v_t^{\varnothing}.
+\end{aligned}
+\end{equation}
+
+The resulting renoising step is
+\begin{equation}
+z_{t-1} =
+(1 - \sigma_{t-1}) z_{0|t}
++
+\sigma_{t-1} \epsilon_t^{\varnothing}.
+\end{equation}
+
+This preserves the key CFG++ property: the clean estimate is computed using the guided prediction ($\hat{v}_t$), while the stochastic renoising direction is taken from the unconditional model ($\epsilon_t^{\varnothing}$), exactly mirroring the DDIM-based formulation of:
+\begin{equation}
+z_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \, z_{0|t}
+\;+\;
+\sqrt{1-\bar{\alpha}_{t-1}} \, \epsilon^{\varnothing}_t(z_t).
+\end{equation}
+
+\subsection{Velocity-Based Training Objectives}
+
+In DDPM, the model predicts noise $\epsilon$. Under flow matching, the model predicts velocity $v = \epsilon - z_0$, requiring a reformulation of the training losses.
+
+The epsilon loss (Eq.~\ref{eq:eps_loss} in \citep{dahary2025annealing}) becomes a velocity loss:
+\begin{equation}
+L_t^{v} = \| \hat{v}_t - v_{\text{gt}} \|^2,
+\qquad
+v_{\text{gt}} = \epsilon - z_0.
+\end{equation}
+
+The delta loss (Eq.~\ref{eq:delta_loss} in \citep{dahary2025annealing}) depends only on $\delta_t$ and therefore remains structurally identical:
+\begin{equation}
+L_t^{\delta} =
+\| \delta_{t-1} \|_2^2 = \| v_{t-1}^{c}(z_{t-1}) - v_{t-1}^{\varnothing}(z_{t-1}) \|^2.
+\end{equation}
+
+Thus, the method remains mathematically equivalent to the DDIM / DDPM formulation: the only change is replacing noise subtraction with velocity subtraction, which removes the stochastic component of the latent in exactly the same way.
+
+\subsection{Adaptive Loss Balancing via EMA Ratio}
+
+In the original formulation \citep{dahary2025annealing}, the combined training loss is
+\begin{equation}
+\mathcal{L} = \lambda\, L_t^{\delta} + (1-\lambda)\, L_t^{\epsilon}.
+\end{equation}
+However, the magnitudes of $L_t^{\delta}$ and $L_t^{v}$ (the flow-matching analog of $L_t^{\epsilon}$) can differ by orders of magnitude and shift during training, making the fixed $\lambda$ weighting unreliable: when $L_t^{\delta} \ll L_t^{v}$, the $\delta$-loss gradient is effectively drowned out regardless of $\lambda$.
+
+To address this, we introduce an adaptive ratio that normalizes the $\delta$-loss contribution relative to the $v$-loss. Let $\bar{L}^{v}$ and $\bar{L}^{\delta}$ denote exponential moving averages of the two loss terms, updated at each step with momentum $\beta = 0.999$:
+\begin{equation}
+\bar{L}^{v} \leftarrow \beta\, \bar{L}^{v} + (1-\beta)\, L_t^{v},
+\qquad
+\bar{L}^{\delta} \leftarrow \beta\, \bar{L}^{\delta} + (1-\beta)\, L_t^{\delta}.
+\end{equation}
+
+The adaptive ratio is then
+\begin{equation}
+r = \min\!\left(\frac{\bar{L}^{v}}{\max(\bar{L}^{\delta},\, \epsilon_0)},\; R_{\max}\right),
+\end{equation}
+where $\epsilon_0 = 10^{-8}$ prevents division by zero and $R_{\max} = 10^{4}$ caps the ratio to avoid instability.
+
+The modified training loss becomes
+\begin{equation}
+\mathcal{L} = (1-\lambda)\, L_t^{v} \;+\; r \cdot \lambda\, L_t^{\delta}.
+\label{eq:adaptive_loss}
+\end{equation}
+
+This ensures that, on average, a unit change in $\lambda$ produces a comparable shift in gradient magnitude for both objectives. The EMA smoothing prevents the ratio from oscillating due to per-batch variance, while the clamp avoids degenerate scaling early in training when the EMA estimates are still warming up.
+
+\newcommand{\eqline}[1]{\makebox[\linewidth][l]{$#1$}}
+\newcommand{\eqscale}{0.85}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+
+\begin{tabular}{p{0.48\linewidth} p{0.48\linewidth}}
+\multicolumn{1}{c}{\textbf{DDPM/DDIM (noise prediction)}} &
+\multicolumn{1}{c}{\textbf{Flow Matching (velocity prediction)}} \\
+\midrule
+
+\textbf{Prediction target} & \textbf{Prediction target} \\
+
+\scalebox{\eqscale}{\eqline{\epsilon_t^{c}(z_t)\approx \epsilon}} &
+\scalebox{\eqscale}{\eqline{v_t^{c}(z_t)\approx v}} \\
+
+\scalebox{\eqscale}{\eqline{\text{(guidance: }\hat{\epsilon}_t=\epsilon_t^{\varnothing}+w(\epsilon_t^{c}-\epsilon_t^{\varnothing})\text{)}}} &
+\scalebox{\eqscale}{\eqline{\text{(guidance: }\hat{v}_t=v_t^{\varnothing}+w(v_t^{c}-v_t^{\varnothing})\text{)}}} \\
+
+\addlinespace[2pt]
+\midrule
+
+\textbf{$\epsilon$-loss} & \textbf{$v$-loss (velocity analog)} \\
+
+\scalebox{\eqscale}{\eqline{L_t^{\epsilon}=\|\hat{\epsilon}_t-\epsilon\|^2}} &
+\scalebox{\eqscale}{\eqline{L_t^{v}=\|\hat{v}_t-v_{\mathrm{gt}}\|^2}} \\
+
+\scalebox{\eqscale}{\eqline{\phantom{v_{\mathrm{gt}}=\epsilon-z_0}}} &
+\scalebox{\eqscale}{\eqline{v_{\mathrm{gt}}=\epsilon-z_0}} \\
+
+\multicolumn{1}{c}{\textit{Supervises noise prediction}} &
+\multicolumn{1}{c}{\textit{Supervises velocity prediction}} \\
+
+\addlinespace[2pt]
+\midrule
+
+\textbf{$\delta$-loss} & \textbf{$\delta$-loss} \\
+
+\scalebox{\eqscale}{\eqline{L_t^{\delta}=\|\epsilon_{t-1}^{c}(z_{t-1})-\epsilon_{t-1}^{\varnothing}(z_{t-1})\|^2}} &
+\scalebox{\eqscale}{\eqline{L_t^{\delta}=\|v_{t-1}^{c}(z_{t-1})-v_{t-1}^{\varnothing}(z_{t-1})\|^2}} \\
+
+\multicolumn{1}{c}{\textit{Measures conditional--unconditional gap}} &
+\multicolumn{1}{c}{\textit{Measures conditional--unconditional gap}} \\
+
+\end{tabular}
+\caption{Training objectives under noise prediction (DDPM/DDIM) versus velocity prediction (flow matching). The $\epsilon$-loss ($L_t^\epsilon$) becomes a velocity loss ($L_t^v$), while the $\delta$-loss ($L_t^\delta = \|\delta_{t-1}\|_2^2$) is structurally unchanged.}
+\end{table}
+
+
+
+
+\subsection{Two-Pass Training with Frozen Transformer}
+
+The SD3 MMDiT transformer is kept frozen throughout training; only the lightweight scheduler $w_\theta$ ($\sim$50K parameters) is optimized. Gradients for the $\delta$-loss flow through the frozen transformer via the input latent $z_{t-1}$, which depends on the scheduler output $w_\theta$.
+
+\paragraph{Pass 1} (no gradient): Run the transformer at $z_t$ to obtain $v_t^{\varnothing}, v_t^{c}$. The scheduler predicts $w_\theta(t, \delta_t, \lambda)$ and we compute $\hat{v}_t$ and the CFG++ step to produce $z_{t-1}$.
+
+\paragraph{Pass 2} (with gradient): Run the transformer at $z_{t-1}$ to obtain $\delta_{t-1} = v_{t-1}^{c}(z_{t-1}) - v_{t-1}^{\varnothing}(z_{t-1})$. Since $z_{t-1}$ depends on $w_\theta$, backpropagation through the transformer's forward pass (with frozen parameters) yields $\partial L_t^{\delta} / \partial \theta$.
+
+Gradient checkpointing on the transformer reduces peak memory. Training was performed using DDP on 2$\times$ NVIDIA L40S GPUs (48\,GB VRAM each), with peak memory usage of $\sim$31.5\,GB per GPU.
+
+\subsection{Handling Multiple Text Encoders}
+
+Unlike SDXL, which uses two text encoders, SD3 employs three: CLIP L/14, OpenCLIP bigG/14, and T5-XXL, producing both sequence-level and pooled embeddings.
+
+To preserve the CADS perturbation behavior, noise is applied independently to:
+\begin{itemize}
+\item sequence embeddings,
+\item pooled embeddings,
+\end{itemize}
+for the conditional branch only, while unconditional embeddings remain unperturbed. This maintains classifier-free guidance structure while extending prompt perturbation to multi-encoder conditioning.
+
+\subsection{Direct CFG++ Sampling without Scheduler Step}
+
+Standard schedulers assume a predefined update rule and are unaware of CFG++ renoising.
+Because the modified update computes
+\begin{equation}
+z_{t-1}
+=
+(1 - \sigma_{t-1}) z_{0|t}
++
+\sigma_{t-1} \epsilon_t^{\varnothing},
+\end{equation}
+directly, invoking the scheduler's \texttt{step()} would incorrectly apply a second update.
+
+Instead, we bypass the scheduler update and manually advance its internal timestep index to keep noise-level bookkeeping consistent. This ensures correct integration of CFG++ with flow-matching sampling.
+
+
+
+
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+
+% reuse \eqscale from earlier (0.85)
+
+\begin{tabular}{p{0.48\linewidth} p{0.48\linewidth}}
+\multicolumn{1}{c}{\textbf{DDIM}} & \multicolumn{1}{c}{\textbf{Flow Matching}} \\
+\midrule
+
+\textbf{No Guidance} & \textbf{No Guidance} \\
+
+\scalebox{\eqscale}{\eqline{z_{0|t}=(z_t-\sqrt{1-\bar{\alpha}_t}\,\epsilon_t^{\varnothing})/\sqrt{\bar{\alpha}_t}}} &
+\scalebox{\eqscale}{\eqline{z_{0|t}=z_t-\sigma_t v_t^{\varnothing}}} \\
+
+\scalebox{\eqscale}{\eqline{z_{t-1}=\sqrt{\bar{\alpha}_{t-1}}\,z_{0|t}+\sqrt{1-\bar{\alpha}_{t-1}}\,\epsilon_t^{\varnothing}}} &
+\scalebox{\eqscale}{\eqline{z_{t-1}=z_{0|t}+\sigma_{t-1}v_t^{\varnothing}}} \\
+
+\multicolumn{1}{c}{\textit{Signal: $\varnothing$ \quad Noise: $\varnothing$}} &
+\multicolumn{1}{c}{\textit{Signal: $\varnothing$ \quad Velocity: $\varnothing$}} \\
+
+\addlinespace[2pt]
+\midrule
+
+\textbf{CFG} & \textbf{CFG} \\
+
+\scalebox{\eqscale}{\eqline{\hat{\epsilon}_t=\epsilon_t^{\varnothing}+w(\epsilon_t^{c}-\epsilon_t^{\varnothing})}} &
+\scalebox{\eqscale}{\eqline{\hat{v}_t=v_t^{\varnothing}+w(v_t^{c}-v_t^{\varnothing})}} \\
+
+\scalebox{\eqscale}{\eqline{z_{0|t}=(z_t-\sqrt{1-\bar{\alpha}_t}\,\hat{\epsilon}_t)/\sqrt{\bar{\alpha}_t}}} &
+\scalebox{\eqscale}{\eqline{z_{0|t}=z_t-\sigma_t \hat{v}_t}} \\
+
+\scalebox{\eqscale}{\eqline{z_{t-1}=\sqrt{\bar{\alpha}_{t-1}}\,z_{0|t}+\sqrt{1-\bar{\alpha}_{t-1}}\,\hat{\epsilon}_t}} &
+\scalebox{\eqscale}{\eqline{z_{t-1}=z_{0|t}+\sigma_{t-1}\hat{v}_t}} \\
+
+\multicolumn{1}{c}{\textit{Signal: guided \quad Noise: guided}} &
+\multicolumn{1}{c}{\textit{Signal: guided \quad Velocity: guided}} \\
+
+\addlinespace[2pt]
+\midrule
+
+\textbf{CFG++} & \textbf{CFG++} \\
+
+\scalebox{\eqscale}{\eqline{\hat{\epsilon}_t=\epsilon_t^{\varnothing}+w(\epsilon_t^{c}-\epsilon_t^{\varnothing})}} &
+\scalebox{\eqscale}{\eqline{\hat{v}_t=v_t^{\varnothing}+w(v_t^{c}-v_t^{\varnothing})}} \\
+
+\scalebox{\eqscale}{\eqline{z_{0|t}=(z_t-\sqrt{1-\bar{\alpha}_t}\,\hat{\epsilon}_t)/\sqrt{\bar{\alpha}_t}}} &
+\scalebox{\eqscale}{\eqline{z_{0|t}=z_t-\sigma_t \hat{v}_t}} \\
+
+\scalebox{\eqscale}{\eqline{z_{t-1}=\sqrt{\bar{\alpha}_{t-1}}\,z_{0|t}+\sqrt{1-\bar{\alpha}_{t-1}}\,\epsilon_t^{\varnothing}}} &
+\scalebox{\eqscale}{\eqline{z_{t-1}=(1{-}\sigma_{t-1})z_{0|t}+\sigma_{t-1}\epsilon_t^{\varnothing}}} \\
+
+& \scalebox{\eqscale}{\eqline{\epsilon_t^{\varnothing}=z_t+(1{-}\sigma_t)v_t^{\varnothing}}} \\
+
+\multicolumn{1}{c}{\textit{Signal: guided \quad Noise: $\varnothing$}} &
+\multicolumn{1}{c}{\textit{Signal: guided \quad Noise: $\varnothing$}} \\
+
+\end{tabular}
+\caption{Guidance placement in DDIM and Flow Matching.}
+\end{table}
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Qualitative Behavior of the Learned Guidance Scale}
+\label{sec:qualitative_w_behavior}
+
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{assets/sanity_w_compare.pdf}
+  \caption{Sanity-check comparison of the learned guidance scale under $v$-only (the flow-matching analog of $\epsilon$-only) and $\delta$-only training.}
+  \Description{A comparison plot showing learned guidance-scale behavior for v-only and delta-only training objectives.}
+  \label{fig:sanity_w_compare}
+\end{figure}
+
+
+We give a heuristic analysis of the learned guidance scale \(w\) under the six training variants obtained by combining the training objective
+(\(\delta\)-only, \(v\)-only, or joint \(\delta{+}v\))
+with the sampling rule (CFG or CFG++).
+As a sanity check, Figure~\ref{fig:sanity_w_compare} compares the learned guidance-scale behavior under the \(v\)-only and \(\delta\)-only objectives, illustrating the distinct optimization pressures discussed below.
+The discussion below is intentionally qualitative: it explains the direction of the optimization pressure on \(w\), rather than proving a closed-form optimum.
+
+\paragraph{Setup.}
+At time \(t\), the guided velocity is
+\begin{equation}
+\hat v_t = v_t^{\varnothing} + w_t \,\delta_t,
+\qquad
+\delta_t = v_t^c - v_t^{\varnothing}.
+\end{equation}
+The role of \(w_t\) is to determine how strongly the current step follows the conditional branch.
+Larger \(w_t\) pushes the guided estimate closer to the conditional prediction and therefore moves the next latent \(z_{t-1}\) further toward a condition-dependent trajectory.
+
+For standard CFG, the full update is guided:
+\begin{equation}
+z_{t-1}^{\mathrm{CFG}}
+=
+z_{0|t} + \sigma_{t-1}\hat v_t,
+\qquad
+z_{0|t}=z_t-\sigma_t \hat v_t.
+\end{equation}
+Thus, increasing \(w_t\) makes both the denoised signal and the renoising direction more conditional.
+
+For CFG++, only the signal is guided, while the renoising direction remains unconditional:
+\begin{equation}
+z_{t-1}^{\mathrm{CFG++}}
+=
+(1-\sigma_{t-1}) z_{0|t} + \sigma_{t-1}\epsilon_t^{\varnothing},
+\qquad
+\epsilon_t^{\varnothing}=z_t+(1-\sigma_t)v_t^{\varnothing}.
+\end{equation}
+Hence, increasing \(w_t\) still pulls the trajectory toward the conditional branch, but this pull is partially opposed by unconditional renoising.
+In this sense, CFG++ is more anchored to the unconditional trajectory than CFG.
+
+\paragraph{\(\delta\)-loss.}
+Under \(\delta\)-only training, the objective is to make
+\begin{equation}
+L_t^\delta = \|\delta_{t-1}\|^2
+=
+\|v_{t-1}^c(z_{t-1}) - v_{t-1}^{\varnothing}(z_{t-1})\|^2
+\end{equation}
+small.
+Since the backbone is frozen, the optimization cannot directly change the vector fields \(v^c\) and \(v^{\varnothing}\); it can only change the trajectory by adjusting \(w_t\).
+Thus, \(w_t\) is used as a control variable for moving \(z_{t-1}\) into regions where the conditional and unconditional predictions are closer.
+In plain terms: the model increases \(w_t\) when stronger guidance is needed to steer the next latent toward the conditional branch quickly enough for the future conditional--unconditional gap to shrink.
+
+This pressure is stronger in CFG than in CFG++.
+In CFG, a large \(w_t\) directly controls both the signal and the noise used to form \(z_{t-1}\), so increasing \(w_t\) is an effective way to move the trajectory toward a strongly conditional state.
+In CFG++, the unconditional renoising term keeps part of the trajectory tied to the unconditional branch; therefore, less benefit is obtained from aggressively increasing \(w_t\), and the optimizer can often settle on smaller values.
+
+\paragraph{\(v\)-loss.}
+Under \(v\)-only training, the objective is
+\begin{equation}
+L_t^v = \|\hat v_t - v_{\mathrm{gt}}\|^2.
+\end{equation}
+This loss is evaluated at time \(t\), before the CFG/CFG++ distinction appears.
+Therefore, the optimization pressure on \(w_t\) is identical for CFG and CFG++ in the \(v\)-only regime.
+Since \(v_t^{\varnothing}\) already approximates the ground-truth velocity, the conditional offset \(\delta_t\) usually acts as a semantic bias rather than a better estimator of \(v_{\mathrm{gt}}\).
+Consequently, the loss is minimized by suppressing the conditional correction, and \(w_t\) is driven toward small values, often close to zero.
+
+\paragraph{Joint training.}
+With both losses active, the learned \(w_t\) balances two competing effects.
+The \(\delta\)-loss favors larger \(w_t\), because strong guidance is the mechanism that moves \(z_{t-1}\) closer to the conditional branch and thereby changes the next-step gap.
+The \(v\)-loss favors smaller \(w_t\), because it penalizes deviations from the unconditional predictor when those deviations do not improve velocity accuracy.
+The resulting \(w_t\) therefore lies between the two extremes:
+larger than in \(v\)-only training, but smaller than in \(\delta\)-only training.
+Because CFG gives \(w_t\) more direct control over the full update, the joint optimum is also expected to be larger in CFG than in CFG++.
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{p{0.14\linewidth} p{0.11\linewidth} p{0.18\linewidth} p{0.25\linewidth} p{0.22\linewidth}}
+\toprule
+\textbf{Loss setting} & \textbf{Rule} & \textbf{Main pressure on \(w_t\)} & \textbf{Formal intuition} & \textbf{Expected behavior of \(w_t\)} \\
+\midrule
+
+\textbf{\(\delta\)-only} & \textbf{CFG} &
+Increase \(w_t\) to strongly steer \(z_{t-1}\) toward the conditional branch &
+\(L_t^\delta=\|\delta_{t-1}\|^2\) depends on \(w_t\) only through \(z_{t-1}\). In CFG, both the denoised estimate and the renoising term depend on \(\hat v_t\), so larger \(w_t\) is the strongest available control for moving \(z_{t-1}\) toward a condition-dependent trajectory. &
+High \(w_t\); typically the largest among all six cases. \\
+
+\midrule
+
+\textbf{\(\delta\)-only} & \textbf{CFG++} &
+Increase \(w_t\), but less aggressively &
+The objective is still to choose \(z_{t-1}\) so that \(v^c(z_{t-1})\) and \(v^{\varnothing}(z_{t-1})\) become closer. However, unconditional renoising anchors the update to \(v^{\varnothing}\), so increasing \(w_t\) has weaker leverage over the full step than in CFG. &
+Moderately high \(w_t\), but typically lower than \(\delta\)-only CFG. \\
+
+\midrule
+
+\textbf{\(v\)-only} & \textbf{CFG} &
+Suppress conditional correction &
+\(L_t^v=\|\hat v_t-v_{\mathrm{gt}}\|^2\) is evaluated before the CFG/CFG++ distinction. Since \(v_t^{\varnothing}\) already approximates \(v_{\mathrm{gt}}\), adding \(w_t\delta_t\) usually hurts velocity accuracy unless the conditional branch is unusually aligned with the target. &
+Small \(w_t\), often tending toward \(0\). \\
+
+\midrule
+
+\textbf{\(v\)-only} & \textbf{CFG++} &
+Same as CFG &
+Exactly the same \(v\)-loss is optimized at time \(t\); the CFG++ renoising rule affects only later quantities, not \(L_t^v\) itself. Therefore the gradient on \(w_t\) is the same as in CFG in this regime. &
+Small \(w_t\), essentially the same expectation as \(v\)-only CFG. \\
+
+\midrule
+
+\textbf{\(\delta{+}v\)} & \textbf{CFG} &
+Compromise between strong steering and velocity fidelity &
+The \(\delta\)-loss rewards larger \(w_t\) because it gives stronger control over \(z_{t-1}\), while the \(v\)-loss penalizes excessive deviation from \(v_t^{\varnothing}\). Since CFG allows \(w_t\) to control the entire update, the optimizer can profit from relatively large guidance before the \(v\)-loss pushes back. &
+Intermediate-to-high \(w_t\): lower than \(\delta\)-only CFG, higher than \(v\)-only CFG. \\
+
+\midrule
+
+\textbf{\(\delta{+}v\)} & \textbf{CFG++} &
+Same compromise, but with weaker need for large guidance &
+The \(\delta\)-loss still benefits from moving \(z_{t-1}\) toward the conditional branch, but unconditional renoising already keeps the trajectory partly aligned with the unconditional dynamics. Thus a smaller \(w_t\) is often sufficient to obtain the desired future-gap reduction, while the \(v\)-loss still discourages over-guidance. &
+Intermediate \(w_t\), typically below joint-training CFG. \\
+
+\bottomrule
+\end{tabular}
+\caption{Heuristic behavior of the learned guidance scale \(w_t\) across the six training variants. The key distinction is that \(\delta\)-loss acts indirectly through the next latent \(z_{t-1}\), so it tends to favor larger guidance when stronger steering toward the conditional trajectory is needed, whereas \(v\)-loss acts directly on \(\hat v_t\) and therefore tends to suppress unnecessary conditional offsets.}
+\label{tab:six_variants_w}
+\end{table*}
+
+\paragraph{Summary.}
+The six cases can be understood through a simple control perspective:
+\(\delta\)-loss uses \(w_t\) to move the next latent, and therefore tends to prefer larger guidance;
+\(v\)-loss uses \(w_t\) to match the current velocity target, and therefore tends to prefer smaller guidance.
+CFG makes \(w_t\) the controller of the entire update, so high guidance is more useful there.
+CFG++ keeps part of the step unconditional, so the same future-gap reduction can often be achieved with smaller \(w_t\).
+
+
+
+
+
+
+
+
+
+
+
+
+
+% \FloatBarrier
+\begin{algorithm}[t]
+
+\caption{Annealing Scheduler -- Training (Flow Matching / SD3)}
+\label{alg:annealing_scheduler_fm}
+\SetKwInOut{Input}{Require}
+\Input{ \BlankLine
+  $w_\theta$: \textbf{trainable} guidance scale model\;
+  $v^{(\cdot)}(z,t)$: \textbf{frozen} velocity predictor, accepts $\varnothing$ or a condition $c$\;
+  $T$: total number of denoising steps\;
+  $\sigma_t = t/T$: noise level at step $t$
+}
+
+\Repeat{converged}{
+
+  \tcp{--- Sample data and noise ---}
+  Sample $(z_0, c) \sim p(z_0, c)$, $t \sim U[1, T]$, $\epsilon \sim \mathcal{N}(0, \mathbf{I})$, $\lambda\sim U[0,1]$\;
+  $z_t \gets (1 - \sigma_t)\,z_0 + \sigma_t\,\epsilon$\;
+  $v_{\text{gt}} \gets \epsilon - z_0$\;
+  $\tilde{c} \gets \text{Perturb}(c)$\;
+  \BlankLine
+
+  \tcp{--- Pass 1: step at time $t$ (no gradient) ---}
+  $v_t^{\varnothing} \gets v(z_t, t, \varnothing)$,\quad $v_t^{c} \gets v(z_t, t, \tilde{c})$\;
+  $\delta_t \gets v_t^{c} - v_t^{\varnothing}$\;
+  $\hat{v}_t \gets v_t^{\varnothing} + w_\theta(t, \delta_t, \lambda) \cdot \delta_t$ \tcp*{Annealed CFG}
+  $z_{0|t} \gets z_t - \sigma_t\,\hat{v}_t$ \tcp*{Denoise}
+  $\epsilon_t^{\varnothing} \gets z_t + (1 - \sigma_t)\,v_t^{\varnothing}$ \tcp*{Unconditional noise}
+  $z_{t-1} \gets (1 - \sigma_{t-1})\,z_{0|t} + \sigma_{t-1}\,\epsilon_t^{\varnothing}$ \tcp*{CFG++ renoise}
+  \BlankLine
+
+  \tcp{--- Pass 2: step at time $t{-}1$ (with gradient) ---}
+  $\delta_{t-1} \gets v^{c}(z_{t-1}, t{-}1, \tilde{c}) - v^{\varnothing}(z_{t-1}, t{-}1, \varnothing)$\;
+  \BlankLine
+
+  \tcp{--- Compute loss and update ---}
+  $\mathcal{L} \gets \lambda\,\|\delta_{t-1}\|^2 + (1 - \lambda)\,\|\hat{v}_t - v_{\text{GT}}\|^2$\;
+  Take gradient step on $\nabla_\theta \mathcal{L}$ \tcp*{Update scheduler}
+}
+\end{algorithm}
+
+\section{Auto-$\lambda$: Geometry-Driven Guidance Selection}
+At inference, $\lambda$ is normally chosen by hand to trade quality for prompt adherence. We replace this manual choice with a per-step \emph{geometry-driven} value computed directly from the conditional/unconditional alignment, $\lambda_t = \mathrm{clip}\!\left(\tfrac{1+\cos(v_t^{\varnothing},\delta_t)}{2},\,0,\,1\right)$, where $\delta_t = v_t^c - v_t^{\varnothing}$. Intuitively, when the conditional correction is well aligned with the unconditional flow ($\cos\!\to\!1$) the model can safely amplify it; when they oppose ($\cos\!\to\!-1$) the correction is suppressed; orthogonal corrections produce $\lambda_t=0.5$. Since $\lambda_t$ is fed into the same MLP that was trained on user-chosen $\lambda$, this requires no retraining and adds no model evaluations.
+
+\section{FSG at Inference for Annealing Guidance}
+We import the FSG site schedule of \citet{fsg2025} on top of our learned scheduler: a small set $\{(t_i, K_i, \Delta t_i)\}_{i=1}^{3}$ of early calibration sites with iteration counts $K=(3,2,2)$ and a fixed interval $\Delta t = 0.125\,T$. At each site we run $K_i$ inner iterations of (guided forward to $s_i$, unconditional inverse back to $t_i$) using $w_\theta$ to refine $z_{t_i}$, then take the actual scheduler step from the refined latent. All other steps remain plain annealed CFG++. At inference we also pass the normalized interval $(t-s)/T$ and the pooled prompt embedding $c_{\text{emb}}$ to $w_\theta$ when those inputs are present; for legacy checkpoints they default to zero and the call reduces to the original signature.
+
+\begin{algorithm}[t]
+\caption{Annealing Inference with FSG (3 early sites, $K=(3,2,2)$)}
+\label{alg:fsg_inference}
+\KwIn{$T$ sampling steps; trained $w_\theta$; condition $c$; site set $\{(t_i, K_i, s_i=t_i-\Delta t)\}_{i=1}^{3}$ with $\Delta t = 0.125\,T$.}
+$z_T \sim \mathcal{N}(0, I)$\;
+\For{$i = 1$ \KwTo $T$}{
+  \If{$t_i$ \textbf{is the closest sampling step to an FSG site} $(t_*,K_*,s_*)$}{
+    $z \gets z_{t_i}$\;
+    \For{$k=1$ \KwTo $K_*$}{
+      $v^{\varnothing}, v^{c} \gets v(z,t_i,\varnothing), v(z,t_i,c)$;\quad $\hat v \gets v^{\varnothing}+w_\theta(t_i,\delta,\lambda,(t_i-s_*)/T,c_{\text{emb}})\,(v^{c}-v^{\varnothing})$\;
+      $z_{s} \gets \mathrm{forward}_{t_i\to s_*}(z;\hat v)$;\quad $z \gets \mathrm{inverse}_{s_*\to t_i}(z_{s}; v^{\varnothing}(z_{s},s_*,\varnothing))$ \tcp*[r]{guided forward, unconditional inverse}
+    }
+    $z_{t_i}\gets z$ \tcp*{refined latent}
+  }
+  Recompute $v^{\varnothing}, v^{c}$ at $z_{t_i}$ and take one CFG++ annealed step $z_{t_i}\!\to\!z_{t_{i+1}}$\;
+}
+\KwRet $z_0$
+\end{algorithm}
+
+\section{Extended-MLP Training with FSG Calibration}
+\label{sec:extended_mlp_training}
+To make the scheduler aware of the FSG operator that will be used at inference, we add an \emph{extended} training mode that mixes 50\% standard one-step training with 50\% FSG-aligned training: when the sampled $t$ falls inside the early FSG region $[0,\,0.375\cdot 1000]$, we snap it to the nearest FSG site, run the matching $K_i$-iteration FSG block, and minimize a self-consistency term $\lambda_{\text{SC}}\,\mathrm{MMD}^2(\{z_{t_i}^{(K_i)}\},\{z_{t_i}^{(0)}\})$ on the \emph{final} FSG iterate, where $z_{t_i}^{(0)}$ are directly noised site latents and the minibatch MMD uses the energy kernel $k(x,y)=-\|x-y\|_2$ (following \citet{learn2guide2025}); the rest of the loss is unchanged. The MLP itself is extended with two extra positional-style features, the normalized interval $(t-s)/T$ and a learned linear projection of the pooled prompt embedding $c_{\text{emb}}\in\mathbb{R}^{2048}\!\to\!\mathbb{R}^{4}$, so that the same scheduler can predict $w$ for both regular CFG++ steps and FSG-calibration steps.
+Formally, for a fixed FSG site $t_i>s_i$, let $(x_0,c)\sim p_{0,c}$, let $z_{t_i}^{(0)}\sim p_{t_i|0}(\cdot\mid x_0)$ be the directly noised latent at that site, and let $z_{t_i}^{(K_i)}\sim \hat p^{\theta,K_i}_{t_i\mid t_i,c}(\cdot\mid z_{t_i}^{(0)},c)$ denote the final latent after $K_i$ guided forward/inverse FSG refinements driven by $w_\theta$.
+The self-consistency condition is that, conditional on the same $(x_0,c)$, the guided site marginal matches the true noising marginal: $\hat p^{\theta,K_i}_{t_i\mid t_i,c}(\cdot\mid z_{t_i}^{(0)},c)\approx p_{t_i|0}(\cdot\mid x_0)$.
+We optimize the minibatch estimator of $\mathrm{MMD}^2(P,Q)=\mathbb{E}_{x,x'\sim P}[k(x,x')]+\mathbb{E}_{y,y'\sim Q}[k(y,y')]-2\mathbb{E}_{x\sim P,y\sim Q}[k(x,y)]$ with $k(x,y)=-\|x-y\|_2$, using $P=\{z_{t_i}^{(K_i)}\}$ and $Q=\{z_{t_i}^{(0)}\}$ at the final FSG iterate.
+
+\begin{algorithm}[t]
+\caption{Extended-MLP Training with FSG Self-Consistency MMD}
+\label{alg:extended_training}
+\KwIn{Frozen velocity model $v$; trainable $w_\theta$ with extra inputs $\{(t-s)/T,c_{\text{emb}}\}$; FSG sites $\{(t_i,K_i,\Delta t)\}_{i=1}^{3}$; SC weight $\lambda_{\text{SC}}$.}
+\Repeat{converged}{
+  Sample $(z_0,c),\,t\sim U[1,1000],\,\lambda\sim U[0,1]$;\quad form $z_t,\,v_{\text{gt}}$\;
+  \eIf{$\mathrm{Bernoulli}(0.5)=1$ \textbf{and} $t\le 375$}{
+    \tcp{--- FSG-aligned branch ---}
+    Snap $t$ to the nearest FSG site $(t_*,K_*,s_*)$; rebuild $z_{t_*}$\;
+    Run $K_*$ FSG inner iterations on $z_{t_*}$ with $w_\theta(t_*,\delta,\lambda,(t_*-s_*)/T,c_{\text{emb}})$, obtaining the final iterate $z_{t_*}^{(K_*)}$\;
+    Recompute $v^{\varnothing},v^{c}$ at $z_{t_*}^{(K_*)}$ and take one CFG++ step to get $z_{t_*-1}$\;
+    $\mathcal{L}\gets\lambda\,\|\delta_{t_*-1}\|^2 + (1-\lambda)\,\bar{r}\,\|\hat v_{t_*}-v_{\text{gt}}\|^2 + \lambda_{\text{SC}}\,\mathrm{MMD}^2(\{z_{t_*}^{(K_*)}\},\{z_{t_*}^{(0)}\})$ \tcp*[r]{energy-kernel SC on final iterate only}
+  }{
+    \tcp{--- Regular one-step branch (with extra inputs) ---}
+    Run one CFG++ step using $w_\theta(t,\delta,\lambda,(t{-}t{-}1)/T,c_{\text{emb}})$\;
+    $\mathcal{L}\gets\lambda\,\|\delta_{t-1}\|^2 + (1-\lambda)\,\bar{r}\,\|\hat v_t-v_{\text{gt}}\|^2$\;
+  }
+  Take a gradient step on $\nabla_\theta\mathcal{L}$ \tcp*{only $w_\theta$ is trained}
+}
+\end{algorithm}
+
+\clearpage
+
+
+%%
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{acmart}
+
+\end{document}
+\endinput
+%%
+%% End of file `sample-acmtog.tex'.

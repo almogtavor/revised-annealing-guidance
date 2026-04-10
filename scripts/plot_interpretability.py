@@ -27,26 +27,32 @@ from src.model.guidance_scale_model import ScalarMLP
 
 def load_model(ckpt_path, device="cpu"):
     ckpt = torch.load(ckpt_path, map_location=device)
-    cfg = ckpt.get("model_config") or ckpt.get("config", {}).get("guidance_scale_model", {})
+    cfg = dict(ckpt.get("model_config") or ckpt.get("config", {}).get("guidance_scale_model", {}))
     sd = ckpt.get("model_state_dict") or ckpt.get("guidance_scale_model")
-    model = ScalarMLP(
-        hidden_size=cfg.get("hidden_size", 128),
-        output_size=cfg.get("output_size", 1),
-        n_layers=cfg.get("n_layers", 2),
-        t_embed_dim=cfg.get("t_embed_dim", 4),
-        delta_embed_dim=cfg.get("delta_embed_dim", 4),
-        lambda_embed_dim=cfg.get("lambda_embed_dim", 4),
-        t_embed_normalization=cfg.get("t_embed_normalization", 1e3),
-        num_timesteps=cfg.get("num_timesteps") or ckpt.get("config", {}).get("diffusion", {}).get("num_sampling_steps") or ckpt.get("config", {}).get("diffusion", {}).get("num_timesteps"),
-        delta_embed_normalization=cfg.get("delta_embed_normalization", 5.0),
-        w_bias=cfg.get("w_bias", 1.0),
-        w_scale=cfg.get("w_scale", 1.0),
-    ).to(device)
+    cfg.setdefault(
+        "num_timesteps",
+        ckpt.get("config", {}).get("diffusion", {}).get("num_sampling_steps")
+        or ckpt.get("config", {}).get("diffusion", {}).get("num_timesteps"),
+    )
+    model = ScalarMLP(**cfg).to(device)
+    model.num_timesteps = cfg.get("num_timesteps")
     model.load_state_dict(sd, strict=True)
     model.eval()
     step = ckpt.get("step", "?")
     label = ckpt.get("config", {}).get("training", {}).get("label", "")
     return model, cfg, step, label
+
+
+def _analysis_kwargs(model, t_batch, device):
+    kwargs = {}
+    if getattr(model, "interval_embed_dim", 0) > 0:
+        num_steps = max(int(getattr(model, "num_timesteps", 20) or 20), 1)
+        next_t = torch.clamp(t_batch - (1000.0 / num_steps), min=0.0)
+        kwargs["interval"] = (t_batch - next_t) / 1000.0
+    if getattr(model, "c_embed_dim", 0) > 0:
+        kwargs["c_emb"] = torch.zeros((t_batch.shape[0], model.c_proj.in_features),
+                                       device=device, dtype=torch.float32)
+    return kwargs
 
 
 @torch.no_grad()
@@ -58,7 +64,7 @@ def eval_w(model, timesteps, delta_norm, lam, device="cpu"):
     text = torch.zeros(n, 1, 1, 1, device=device, dtype=torch.float32)
     t_batch = torch.tensor(timesteps, device=device, dtype=torch.float32)
     l_batch = torch.full((n,), lam, device=device, dtype=torch.float32)
-    w = model(t_batch, l_batch, uncond, text)
+    w = model(t_batch, l_batch, uncond, text, **_analysis_kwargs(model, t_batch, device))
     return w.cpu().numpy()
 
 

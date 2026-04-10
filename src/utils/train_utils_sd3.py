@@ -5,6 +5,7 @@ Forward pass lives in scripts/train.py; shared functions in train_utils.py.
 """
 import os
 import glob
+import re
 import subprocess
 import torch
 from src.utils.train_utils import add_noise_to_prompt, linear_schedule, get_timestep
@@ -21,6 +22,17 @@ def get_num_sampling_steps(config_or_diffusion, default=None):
     if diff is None:
         return default
     return diff.get('num_sampling_steps') or diff.get('num_timesteps') or default
+
+
+def get_prev_timestep(scheduler, timestep):
+    """Return the previous discrete scheduler timestep for each sampled timestep."""
+    scheduler_timesteps = scheduler.timesteps.to(device=timestep.device)
+    scheduler_timesteps_reversed = scheduler_timesteps.flip(0)
+    timestep_f = timestep.float()
+    idx = torch.searchsorted(scheduler_timesteps_reversed, timestep_f, right=False)
+    idx = idx.clamp(min=1)
+    prev = scheduler_timesteps_reversed[idx - 1]
+    return prev.to(dtype=timestep.dtype, device=timestep.device)
 
 
 def load_models(config, device):
@@ -111,6 +123,22 @@ def run_auto_sample(config):
         print("No checkpoints found for auto-sampling.", flush=True)
         return
     latest = os.path.abspath(pts[-1])
+    latest_dir = os.path.dirname(latest)
+    target_images = config['training'].get('max_images')
+    if target_images is None:
+        target_images = config['training'].get('max_steps')
+    if target_images is not None:
+        numbered = []
+        for pt in pts:
+            if os.path.dirname(pt) != latest_dir:
+                continue
+            m = re.search(r'checkpoint_step_(\d+)\.pt$', pt)
+            if m:
+                numbered.append((int(m.group(1)), pt))
+        if numbered:
+            numbered.sort()
+            ge = [pt for n, pt in numbered if n >= target_images]
+            latest = os.path.abspath(ge[0] if ge else numbered[-1][1])
     lr = config.get('training', {}).get('optimizer_kwargs', {}).get('lr')
     label = config.get('training', {}).get('label')
     if lr is not None:
@@ -131,7 +159,7 @@ def run_auto_sample(config):
         print(f"sbatch failed: {result.stderr.strip()}", flush=True)
 
     # Also submit fig2 comparison job
-    fig2_script = os.path.join(repo, "submit_sampling_woman_black_dress.sh")
+    fig2_script = os.path.join(repo, "submit_sd3_sampling_woman_black_dress.sh")
     if os.path.exists(fig2_script):
         print(f"\n{'='*60}\nSUBMITTING FIG2 COMPARISON JOB\n{'='*60}\n", flush=True)
         fig2_vars = f"ALL,FIG2_CHECKPOINT={latest}"
