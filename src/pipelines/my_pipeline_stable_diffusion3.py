@@ -30,6 +30,38 @@ else:
     XLA_AVAILABLE = False
 
 
+def _force_guidance_model_fp32(guidance_scale_model: Optional[torch.nn.Module]) -> Optional[torch.nn.Module]:
+    """Keep the guidance MLP in fp32 to avoid float/half linear mismatches."""
+    if guidance_scale_model is not None:
+        guidance_scale_model.float()
+    return guidance_scale_model
+
+
+def _align_transformer_conditioning(
+    transformer: torch.nn.Module,
+    device: torch.device,
+    prompt_embeds: Optional[torch.Tensor],
+    negative_prompt_embeds: Optional[torch.Tensor],
+    pooled_prompt_embeds: Optional[torch.Tensor],
+    negative_pooled_prompt_embeds: Optional[torch.Tensor],
+):
+    """Match cached prompt tensors to the SD3 transformer dtype/device."""
+    transformer_dtype = next(transformer.parameters()).dtype
+
+    def _cast(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+        return tensor.to(device=device, dtype=transformer_dtype)
+
+    return (
+        transformer_dtype,
+        _cast(prompt_embeds),
+        _cast(negative_prompt_embeds),
+        _cast(pooled_prompt_embeds),
+        _cast(negative_pooled_prompt_embeds),
+    )
+
+
 class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
     """
     Custom SD3 pipeline that adds optional annealing guidance scale support.
@@ -116,6 +148,9 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
 
+        if use_annealing_guidance and guidance_scale_model is not None:
+            guidance_scale_model = _force_guidance_model_fp32(guidance_scale_model)
+
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -152,6 +187,20 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             max_sequence_length=max_sequence_length,
             lora_scale=lora_scale,
         )
+        (
+            transformer_dtype,
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        ) = _align_transformer_conditioning(
+            self.transformer,
+            device,
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        )
 
         if self.do_classifier_free_guidance:
             if skip_guidance_layers is not None:
@@ -167,11 +216,13 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             num_channels_latents,
             height,
             width,
-            prompt_embeds.dtype,
+            transformer_dtype,
             device,
             generator,
             latents,
         )
+        if latents.dtype != transformer_dtype:
+            latents = latents.to(dtype=transformer_dtype)
 
         # 5. Prepare timesteps
         scheduler_kwargs = {}
@@ -215,18 +266,32 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
             else:
                 self._joint_attention_kwargs.update(ip_adapter_image_embeds=ip_adapter_image_embeds)
 
-        # Pre-compute FSG site → inference-step mapping (each FSG site fires
-        # once at the inference step closest to its target timestep).
-        _fsg_site_iters = {}  # step_idx -> K
+        # Pre-compute FSG site -> inference-grid mapping. Each site fires once
+        # at the inference step closest to its anchor t, and uses the closest
+        # cleaner inference step to its long-interval target s inside the
+        # inner calibration loop.
+        _fsg_sites = {}  # step_idx -> mapped site dict
         if use_fsg and fsg_iterations > 0:
             from src.utils.fsg_utils import get_fsg_sites
             _sites = get_fsg_sites(num_inference_steps)
             _ts_list = [float(_t) for _t in timesteps]
             for _site in _sites:
-                _i_best = min(range(len(_ts_list)), key=lambda _i: abs(_ts_list[_i] - _site['t']))
-                _fsg_site_iters[_i_best] = _site['K']
+                _i_t = min(range(len(_ts_list)), key=lambda _i: abs(_ts_list[_i] - _site['t']))
+                _cleaner_idxs = list(range(_i_t + 1, len(_ts_list)))
+                if _cleaner_idxs:
+                    _i_s = min(_cleaner_idxs, key=lambda _i: abs(_ts_list[_i] - _site['s']))
+                else:
+                    _i_s = _i_t
+                _fsg_sites[_i_t] = {
+                    **_site,
+                    "t_idx": _i_t,
+                    "s_idx": _i_s,
+                    "t_grid": _ts_list[_i_t],
+                    "s_grid": _ts_list[_i_s],
+                }
 
         # 7. Denoising loop
+        _w_history = []  # records (timestep, w_value) per step for analysis
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -235,7 +300,7 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                 # At FSG sites the base transformer call is wasted: the FSG inner
                 # loop recomputes everything from latents, then the final post-FSG
                 # recompute provides the noise_pred used by the CFG++ step.
-                _is_fsg_site = bool(use_fsg and i in _fsg_site_iters)
+                _is_fsg_site = bool(use_fsg and i in _fsg_sites)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
@@ -275,6 +340,7 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                             **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds),
                         )
                         v_guided = noise_pred_uncond.float() + guidance_scale_pred * (noise_pred_text.float() - noise_pred_uncond.float())
+                        _w_history.append((t.item(), guidance_scale_pred.item()))
                         _use_cfgpp_step = True
                     elif use_cfgpp:
                         # Fixed-w CFG++ sampling
@@ -287,14 +353,17 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                     if _use_cfgpp_step:
                         sigma_t = t.float() / 1000.0
                         sigma_t1 = timesteps[i + 1].float() / 1000.0 if (i + 1 < len(timesteps)) else 0.0
-                        orig_dtype = noise_pred_uncond.dtype
+                        orig_dtype = latents.dtype if _is_fsg_site else noise_pred_uncond.dtype
 
-                        if use_fsg and i in _fsg_site_iters:
+                        if use_fsg and i in _fsg_sites:
                             # --- FSG: Fixed-point Stochastic Guidance ---
                             # Run K inner iterations only at the 3 designated sites
                             # (rest of the trajectory uses plain CFG++).
                             from src.utils import fsg_stats as _fsg_stats
-                            _site_K = _fsg_site_iters[i]
+                            _site = _fsg_sites[i]
+                            _site_K = _site['K']
+                            _site_s = torch.tensor(_site['s_grid'], device=t.device, dtype=t.dtype)
+                            _site_sigma_s = _site_s.float() / 1000.0
                             z_t = latents.float()
                             _z_t_prev = z_t.clone()
                             for _k in range(_site_K):
@@ -315,7 +384,7 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                 # (2) Predict w and form guided velocity
                                 if use_annealing_guidance and guidance_scale_model is not None:
                                     _w = guidance_scale_model(t, guidance_lambda, _vu.float(), _vt.float(),
-                                                              **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds))
+                                                              **mlp_extras(guidance_scale_model, t, _site_s, pooled_prompt_embeds))
                                     _v_guided = _vu.float() + _w * (_vt.float() - _vu.float())
                                 else:
                                     _w = torch.tensor(self._cfgpp_w, device=_vu.device)
@@ -324,14 +393,16 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                 # Record FSG stats: dz, w, delta_norm
                                 _z_t_prev = _fsg_stats.record_iteration(t, _k, z_t, _z_t_prev, _vt, _vu, _w)
 
-                                # (3) Guided forward step: z_t → z_s (using sigma_t1 as s)
+                                # (3) Guided forward step: z_t -> z_s using the site's
+                                # mapped long-interval target on the inference grid.
                                 _x0 = z_t - sigma_t * _v_guided
                                 _eps_u = z_t + (1.0 - sigma_t) * _vu.float()
-                                z_s = (1.0 - sigma_t1) * _x0 + sigma_t1 * _eps_u
+                                z_s = (1.0 - _site_sigma_s) * _x0 + _site_sigma_s * _eps_u
                                 del _x0, _eps_u, _v_guided, _vu, _vt
 
-                                # (4) Unconditional inverse step: z_s → z_t
-                                _fsg_inv_ts = timesteps[i + 1] if (i + 1 < len(timesteps)) else t
+                                # (4) Unconditional inverse step: z_s -> z_t over the
+                                # same long interval s -> t.
+                                _fsg_inv_ts = _site_s
                                 _fsg_inv_ts = _fsg_inv_ts.expand(z_s.shape[0])
                                 _vu_s = self.transformer(
                                     hidden_states=z_s.to(orig_dtype),
@@ -342,9 +413,9 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                     return_dict=False,
                                 )[0].float()
 
-                                # Inverse flow: z_s at sigma_s → z_t at sigma_t
-                                _x0_inv = z_s - sigma_t1 * _vu_s
-                                _eps_inv = z_s + (1.0 - sigma_t1) * _vu_s
+                                # Inverse flow: z_s at sigma_s -> z_t at sigma_t
+                                _x0_inv = z_s - _site_sigma_s * _vu_s
+                                _eps_inv = z_s + (1.0 - _site_sigma_s) * _vu_s
                                 z_t = (1.0 - sigma_t) * _x0_inv + sigma_t * _eps_inv
                                 del z_s, _vu_s, _x0_inv, _eps_inv
                                 torch.cuda.empty_cache()
@@ -365,6 +436,7 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
                                 _w = guidance_scale_model(t, guidance_lambda, noise_pred_uncond.float(), noise_pred_text.float(),
                                                           **mlp_extras(guidance_scale_model, t, _next_t, pooled_prompt_embeds))
                                 v_guided = noise_pred_uncond.float() + _w * (noise_pred_text.float() - noise_pred_uncond.float())
+                                _w_history.append((t.item(), _w.item()))
                             else:
                                 v_guided = noise_pred_uncond.float() + self._cfgpp_w * (noise_pred_text.float() - noise_pred_uncond.float())
                             latents_f32 = z_t
@@ -439,6 +511,8 @@ class MyStableDiffusion3Pipeline(StableDiffusion3Pipeline):
 
             image = self.vae.decode(latents, return_dict=False)[0]
             image = self.image_processor.postprocess(image, output_type=output_type)
+
+        self._last_w_history = _w_history  # accessible after call for analysis
 
         # Offload all models
         self.maybe_free_model_hooks()

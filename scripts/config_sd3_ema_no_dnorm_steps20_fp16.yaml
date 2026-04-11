@@ -1,4 +1,5 @@
 seed: 42
+fp16: true
 diffusion:
   model_id: stabilityai/stable-diffusion-3-medium-diffusers
   num_sampling_steps: 20
@@ -26,14 +27,13 @@ guidance_scale_model:
   w_bias: 1
 
 training:
-  label: ema_no_dnorm_steps20
+  label: ema_no_dnorm_steps20_fp16
   save_interval: 200
   max_images: 20000
   batch_size: 1
   accumulation_steps: 16
   out_dir: ./output
   image_root: src/data/laion/laion_pop_images/
-  prompt_cache_dir: /home/ML_courses/03683533_2025/or_tal_almog/almog/prompt_cache/
   ema_loss_normalization: true
   optimizer_kwargs:
     weight_decay: 0.01

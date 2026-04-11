@@ -69,7 +69,7 @@ def _patch_dataloader():
 
         batch_size = config["training"]["batch_size"]
         image_root = config["training"]["image_root"]
-        dataset = LaionDataset(image_root)
+        dataset = LaionDataset(image_root, prompt_cache_dir=config["training"].get("prompt_cache_dir"))
         sampler = DistributedSampler(
             dataset, num_replicas=_world_size, rank=_rank, shuffle=True,
         )

@@ -120,16 +120,50 @@ def apg_guidance(noise_pred_uncond, noise_pred_text, guidance_scale):
 def load_pipeline(device, dtype):
     from src.pipelines.my_pipeline_stable_diffusion3 import MyStableDiffusion3Pipeline
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
-    pipeline = MyStableDiffusion3Pipeline.from_pretrained(
-        "stabilityai/stable-diffusion-3-medium-diffusers",
-        torch_dtype=dtype,
-        token=hf_token,
-    )
-    pipeline.to(device)
+    eval_cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "prompt_cache", "_eval_prompts.pt")
+    if os.path.exists(eval_cache):
+        print(f"Eval prompt cache found; loading without text encoders.", flush=True)
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            torch_dtype=dtype, token=hf_token,
+            text_encoder=None, text_encoder_2=None, text_encoder_3=None,
+        )
+        pipeline.transformer.to(device)
+        pipeline.vae.to(device)
+    else:
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            torch_dtype=dtype, token=hf_token,
+        )
+        pipeline.to(device)
     pipeline.set_progress_bar_config(disable=True)
     if hasattr(pipeline, "enable_attention_slicing"):
         pipeline.enable_attention_slicing()
     return pipeline
+
+
+def _align_eval_conditioning(
+    pipeline,
+    device,
+    prompt_embeds,
+    negative_prompt_embeds,
+    pooled_prompt_embeds,
+    negative_pooled_prompt_embeds,
+):
+    from src.pipelines.my_pipeline_stable_diffusion3 import _align_transformer_conditioning
+
+    _, prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = (
+        _align_transformer_conditioning(
+            pipeline.transformer,
+            torch.device(device),
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        )
+    )
+    return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
 
 class AutoLambdaWrapper(torch.nn.Module):
@@ -183,7 +217,7 @@ def load_guidance_model(checkpoint_path, device):
 def generate_single(pipeline, prompt, seed, device, guidance_scale,
                     use_cfgpp=False, use_apg=False,
                     guidance_scale_model=None, guidance_lambda=None,
-                    use_fsg=False, fsg_iterations=3):
+                    use_fsg=False, fsg_iterations=3, cached_embeds=None):
     """Generate a single image. Supports CFG, CFG++, APG, Annealing, and FSG."""
     generator = torch.Generator(device="cuda:0").manual_seed(seed)
 
@@ -191,16 +225,24 @@ def generate_single(pipeline, prompt, seed, device, guidance_scale,
 
     if use_apg:
         with torch.inference_mode():
-            return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator)
+            return _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator,
+                                 cached_embeds=cached_embeds)
 
     kwargs = dict(
         guidance_scale=guidance_scale,
         num_inference_steps=NUM_INFERENCE_STEPS,
         generator=generator,
-        prompt=prompt,
         use_annealing_guidance=use_annealing,
         use_cfgpp=use_cfgpp,
     )
+    if cached_embeds is not None:
+        pe, npe, ppe, nppe = _align_eval_conditioning(pipeline, device, *cached_embeds)
+        kwargs["prompt_embeds"] = pe
+        kwargs["negative_prompt_embeds"] = npe
+        kwargs["pooled_prompt_embeds"] = ppe
+        kwargs["negative_pooled_prompt_embeds"] = nppe
+    else:
+        kwargs["prompt"] = prompt
     if use_annealing:
         kwargs["guidance_scale_model"] = guidance_scale_model
         kwargs["guidance_lambda"] = guidance_lambda
@@ -212,33 +254,30 @@ def generate_single(pipeline, prompt, seed, device, guidance_scale,
         return pipeline(**kwargs).images[0]
 
 
-def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator):
+def _generate_apg(pipeline, prompt, seed, device, guidance_scale, generator, cached_embeds=None):
     """Generate with APG by temporarily patching the pipeline's guidance step."""
-    # We use standard pipeline but override the guidance combination.
-    # The trick: set guidance_scale=1.0 (disable built-in CFG) and manually
-    # combine in a callback. But SD3 pipeline doesn't support per-step callbacks
-    # for guidance easily. Instead, we'll do a simpler approach:
-    #
-    # Run the pipeline with do_classifier_free_guidance=True but intercept
-    # the noise_pred combination. We achieve this by temporarily monkey-patching
-    # the transformer's forward to capture uncond/cond, then apply APG.
-
-    # Simpler approach: use the pipeline normally but with a hook that replaces
-    # the guidance combination.
-    # SIMPLEST: run the denoising loop manually, matching the pipeline's logic.
-    # This is what the paper likely did too.
-
-    # Encode prompt
-    (
-        prompt_embeds,
-        negative_prompt_embeds,
-        pooled_prompt_embeds,
-        negative_pooled_prompt_embeds,
-    ) = pipeline.encode_prompt(
-        prompt=prompt,
-        prompt_2=None,
-        prompt_3=None,
-        do_classifier_free_guidance=True,
+    if cached_embeds is not None:
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
+            cached_embeds
+    else:
+        (
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        ) = pipeline.encode_prompt(
+            prompt=prompt, prompt_2=None, prompt_3=None,
+            do_classifier_free_guidance=True,
+        )
+    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = (
+        _align_eval_conditioning(
+            pipeline,
+            device,
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        )
     )
 
     # Prepare timesteps
@@ -292,7 +331,7 @@ def generate_images_for_config(pipeline, prompts, save_dir, device,
                                guidance_scale, use_cfgpp=False, use_apg=False,
                                guidance_scale_model=None, guidance_lambda=None,
                                use_fsg=False, fsg_iterations=3,
-                               rank=0, world_size=1):
+                               rank=0, world_size=1, prompt_embed_cache=None):
     """Generate images for all prompts, saving to save_dir/. Skip existing."""
     os.makedirs(save_dir, exist_ok=True)
 
@@ -309,6 +348,7 @@ def generate_images_for_config(pipeline, prompts, save_dir, device,
             guidance_scale, use_cfgpp=use_cfgpp, use_apg=use_apg,
             guidance_scale_model=guidance_scale_model, guidance_lambda=guidance_lambda,
             use_fsg=use_fsg, fsg_iterations=fsg_iterations,
+            cached_embeds=prompt_embed_cache.get(caption) if prompt_embed_cache else None,
         )
         img.save(img_path)
         del img
@@ -461,6 +501,14 @@ def main():
     prompts = get_coco_prompts(args.coco_dir)
     print(f"Loaded {len(prompts)} COCO prompts")
 
+    if args.checkpoint and args.num_steps is None:
+        checkpoint_meta = torch.load(args.checkpoint, map_location="cpu")
+        diff_cfg = checkpoint_meta.get("config", {}).get("diffusion", {})
+        inferred_steps = diff_cfg.get("num_sampling_steps") or diff_cfg.get("num_timesteps")
+        if inferred_steps is not None:
+            NUM_INFERENCE_STEPS = inferred_steps
+            print(f"Auto-inferred num_inference_steps={NUM_INFERENCE_STEPS} from checkpoint")
+
     coco_val_dir = os.path.join(args.coco_dir, "val2017")
     os.makedirs(args.output_dir, exist_ok=True)
     BASELINE_CACHE_DIR = os.path.join(_BASELINE_CACHE_ROOT, f"steps{NUM_INFERENCE_STEPS}_n{NUM_IMAGES}")
@@ -479,6 +527,13 @@ def main():
         # --- Load pipeline ---
         pipeline = load_pipeline(device, dtype)
 
+        # --- Load eval prompt cache if available ---
+        eval_cache_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                       "prompt_cache", "_eval_prompts.pt")
+        eval_prompt_cache = torch.load(eval_cache_path, map_location="cpu") if os.path.exists(eval_cache_path) else None
+        if eval_prompt_cache:
+            print(f"Loaded {len(eval_prompt_cache)} cached eval prompts.", flush=True)
+
         # --- Generate baselines (cached) ---
         if not args.skip_baselines:
             print("\n=== Generating baselines (cached) ===")
@@ -494,6 +549,7 @@ def main():
                     pipeline, prompts, save_dir, device,
                     guidance_scale=w, use_cfgpp=use_cfgpp, use_apg=use_apg,
                     rank=rank, world_size=world_size,
+                    prompt_embed_cache=eval_prompt_cache,
                 )
 
         # --- Generate annealing images ---
@@ -532,6 +588,7 @@ def main():
                     guidance_scale_model=model_to_use, guidance_lambda=lam,
                     use_fsg=use_fsg,
                     rank=rank, world_size=world_size,
+                    prompt_embed_cache=eval_prompt_cache,
                 )
 
         # Synchronize GPUs before metrics
@@ -635,6 +692,18 @@ def main():
         json_path = os.path.join(args.output_dir, "metrics_table.json")
         with open(json_path, "w") as f:
             json.dump(results, f, indent=2)
+
+        # Append to cumulative results file
+        global_csv = os.path.join(os.path.dirname(args.output_dir), "results.csv")
+        write_header = not os.path.exists(global_csv)
+        ckpt_name = os.path.basename(args.checkpoint) if args.checkpoint else ""
+        with open(global_csv, "a", newline="") as f:
+            fields = ["run", "checkpoint"] + list(results[0].keys())
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if write_header:
+                writer.writeheader()
+            for r in results:
+                writer.writerow({"run": os.path.basename(args.output_dir), "checkpoint": ckpt_name, **r})
 
 
 if __name__ == "__main__":

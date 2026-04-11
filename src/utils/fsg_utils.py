@@ -12,8 +12,8 @@ import torch.distributed as dist
 import src.utils.train_utils as train_utils
 import src.utils.train_utils_sd3 as train_utils_sd3
 
-# FSG schedule: 3 early sites with decreasing iterations
-# Interval Δ = 0.125 * T (covers first 0.375T of the process)
+# FSG schedule: 3 high-noise sites with decreasing iterations
+# Interval Δ = 0.125 * 1000 (covers the first 0.375 of the denoising trajectory)
 FSG_DELTA_FRAC = 0.125     # Δ/T
 FSG_NUM_SITES = 3          # first 3 sites
 FSG_ITERATIONS = [3, 2, 2] # K per site
@@ -42,28 +42,23 @@ def _energy_mmd(x, y):
 
 
 def get_fsg_sites(T):
-    """Return the 3 FSG site timesteps (in [0, 1000] space) and their intervals.
+    """Return the 3 earliest high-noise FSG sites in [0, 1000] time.
 
-    Sites cover [0, 0.375T] with Δ = 0.125T each.
-    In SD3 flow-matching, sigma = t/1000, so t ∈ [0, 1000].
-    Early = high t (noisy). Site 0 is the noisiest.
+    The sites are anchored at t = 1000, 875, 750 with interval Δt = 125.
+    Site 0 is the noisiest and fires first during denoising.
     """
-    delta = FSG_DELTA_FRAC  # 0.125, as fraction of full horizon
-    # Sites in sigma space (0=clean, 1=noise): 0.375, 0.25, 0.125
-    # In t space (0=clean, 1000=noise):
+    _ = T  # site placement is defined in normalized diffusion time, not by NFE
+    delta_t = FSG_DELTA_FRAC * 1000.0
     sites = []
     for i in range(FSG_NUM_SITES):
-        # Site i covers [(FSG_NUM_SITES - i - 1)*Δ, (FSG_NUM_SITES - i)*Δ]
-        # Site center in sigma space
-        sigma_site = (FSG_NUM_SITES - i - 0.5) * delta
-        t_site = sigma_site * 1000.0  # to timestep space
-        t_target = (sigma_site - delta) * 1000.0  # s = t - Δ (cleaner, t > s)
+        t_site = 1000.0 - i * delta_t
+        t_target = max(t_site - delta_t, 0.0)
         sites.append({
             'index': i,
             't': t_site,
-            's': max(t_target, 0.0),
-            'sigma': sigma_site,
-            'sigma_s': max(sigma_site - delta, 0.0),
+            's': t_target,
+            'sigma': t_site / 1000.0,
+            'sigma_s': t_target / 1000.0,
             'K': FSG_ITERATIONS[i],
         })
     return sites
@@ -73,13 +68,13 @@ def snap_to_fsg_site(timestep_sigma, T):
     """Snap a sigma value to the nearest FSG site. Returns (site_dict, distance) or (None, inf)."""
     sites = get_fsg_sites(T)
     best_site, best_dist = None, float('inf')
-    fsg_boundary = FSG_NUM_SITES * FSG_DELTA_FRAC  # 0.375
+    fsg_boundary = 1.0 - FSG_NUM_SITES * FSG_DELTA_FRAC  # 0.625
     for site in sites:
         dist = abs(timestep_sigma - site['sigma'])
         if dist < best_dist:
             best_site, best_dist = site, dist
-    # Only snap if within FSG region
-    if timestep_sigma <= fsg_boundary:
+    # Only snap if within the early high-noise FSG region.
+    if timestep_sigma >= fsg_boundary:
         return best_site, best_dist
     return None, float('inf')
 
@@ -152,7 +147,7 @@ def fsg_inner_loop(pipeline, model, z_t, t_val, s_val, sigma_t, sigma_s,
     return z_t
 
 
-def forward_pass_fsg(config, pipeline, model, images, prompts):
+def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None):
     """FSG-aligned SD3 forward pass.
 
     50% chance: regular one-step training (identical to forward_pass_sd3)
@@ -174,8 +169,13 @@ def forward_pass_fsg(config, pipeline, model, images, prompts):
     timestep = train_utils.get_timestep(pipeline, batch_size=B)
     noisy_latents, velocity_gt = train_utils_sd3.to_noisy_latents_sd3(pipeline, images, timestep)
 
-    with torch.no_grad():
-        pe, ppe = train_utils_sd3.encode_prompt_sd3(pipeline, prompts)
+    cache_dir = config['training'].get('prompt_cache_dir')
+    if cache_dir and image_paths:
+        pe, ppe = train_utils_sd3.load_cached_prompt_sd3(
+            cache_dir, config['training']['image_root'], image_paths, pipeline.device)
+    else:
+        with torch.no_grad():
+            pe, ppe = train_utils_sd3.encode_prompt_sd3(pipeline, prompts)
     pe, ppe = train_utils_sd3.prompt_add_noise_sd3(
         pe, ppe, timestep, pipeline.scheduler.config.get('num_train_timesteps', 1000),
         **config['training']['prompt_noise'])
@@ -186,12 +186,12 @@ def forward_pass_fsg(config, pipeline, model, images, prompts):
     # Decide mode: 50% FSG-aligned, 50% regular
     use_fsg_mode = torch.rand(1).item() < 0.5
 
-    # Check if timestep falls in FSG region [0, 0.375 * 1000]
+    # Check if timestep falls in the early high-noise FSG region [0.625 * 1000, 1000]
     t_val = timestep.float().mean().item()
-    fsg_boundary = FSG_NUM_SITES * FSG_DELTA_FRAC * 1000.0  # 375.0
+    fsg_boundary = (1.0 - FSG_NUM_SITES * FSG_DELTA_FRAC) * 1000.0  # 625.0
 
     # If coin says FSG and t is in the early region, snap to nearest FSG site
-    run_fsg_block = use_fsg_mode and t_val <= fsg_boundary
+    run_fsg_block = use_fsg_mode and t_val >= fsg_boundary
     if run_fsg_block:
         sigma_val = t_val / 1000.0
         fsg_site, _ = snap_to_fsg_site(sigma_val, T)

@@ -24,8 +24,9 @@ def trim_to_77_tokens(text):
 
 
 class LaionDataset(Dataset):
-    def __init__(self, image_root):
+    def __init__(self, image_root, prompt_cache_dir=None):
         self.image_root = image_root
+        self.prompt_cache_dir = prompt_cache_dir
         self.transform = transforms.Compose([
             transforms.Resize(1024),
             transforms.CenterCrop((1024, 1024)),
@@ -49,15 +50,20 @@ class LaionDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        for attempt in range(10):
+        max_attempts = len(self.image_paths) if self.prompt_cache_dir else 10
+        for attempt in range(max_attempts):
             image_path = self.image_paths[(idx + attempt) % len(self.image_paths)]
             try:
+                if self.prompt_cache_dir:
+                    rel = os.path.relpath(image_path, self.image_root)
+                    if not os.path.exists(os.path.join(self.prompt_cache_dir, rel.replace(".jpg", ".pt"))):
+                        continue
                 with open(image_path.replace('.jpg', '.txt'), 'r') as f:
                     caption = f.readline().strip()
                 image = Image.open(image_path).convert("RGB")
                 image = self.transform(image)
                 caption = trim_to_77_tokens(caption)
-                return caption, image
+                return caption, image, image_path
             except OSError:
                 continue
         raise RuntimeError(f"Failed to load sample after 10 attempts starting at idx {idx}")

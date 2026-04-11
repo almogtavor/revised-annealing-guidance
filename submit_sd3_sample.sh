@@ -196,6 +196,10 @@ if [[ -n "$CKPT" && -n "$CKPT_ID" ]]; then
         --output_dir "$W_PLOT_DIR" \
         --lr_label "$CKPT_ID"
 
+    echo "Generating w trajectory plot..."
+    "$PY" -u scripts/plot_w_trajectories.py \
+        --results_dir "$W_PLOT_DIR"
+
     # --- Fig2 comparison (woman in black dress + two dogs) ---
     echo "Generating fig2 comparison..."
     FIG2_DIR="$OUTPUT_ROOT/$CKPT_ID/fig2"

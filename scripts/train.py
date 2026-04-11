@@ -54,7 +54,7 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
         epoch_start = time.time()
         for batch in tqdm.tqdm(dataloader, miniters=100, mininterval=60):
             model.train()
-            prompts, images = batch
+            prompts, images, image_paths = batch
 
             images = images.to(pipeline.device)
 
@@ -64,7 +64,7 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
 
             completed_step = global_step + 1
 
-            result = forward_fn(config, pipeline, model, images, prompts)
+            result = forward_fn(config, pipeline, model, images, prompts, image_paths=image_paths)
             if isinstance(result, dict):
                 loss = result['loss']
                 extra_metrics = {k: v for k, v in result.items() if k != 'loss'}
@@ -139,6 +139,7 @@ def forward_pass(
     model,
     images,
     prompts,
+    image_paths=None,
 ):
     batch_size = images.size(0)
     
@@ -230,6 +231,7 @@ def forward_pass_sd3(
     model,
     images,
     prompts,
+    image_paths=None,
 ):
     """SD3 forward pass: flow-matching adaptation of Algorithm 1."""
     B = images.size(0)
@@ -242,8 +244,13 @@ def forward_pass_sd3(
     timestep = train_utils.get_timestep(pipeline, batch_size=B)
     noisy_latents, velocity_gt = train_utils_sd3.to_noisy_latents_sd3(pipeline, images, timestep)
 
-    with torch.no_grad():
-        pe, ppe = train_utils_sd3.encode_prompt_sd3(pipeline, prompts)
+    cache_dir = config['training'].get('prompt_cache_dir')
+    if cache_dir and image_paths:
+        pe, ppe = train_utils_sd3.load_cached_prompt_sd3(
+            cache_dir, config['training']['image_root'], image_paths, pipeline.device)
+    else:
+        with torch.no_grad():
+            pe, ppe = train_utils_sd3.encode_prompt_sd3(pipeline, prompts)
     pe, ppe = train_utils_sd3.prompt_add_noise_sd3(
         pe, ppe, timestep, pipeline.scheduler.config.get('num_train_timesteps', 1000),
         **config['training']['prompt_noise'])

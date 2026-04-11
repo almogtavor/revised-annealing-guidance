@@ -315,13 +315,24 @@ def load_pipeline_and_model(checkpoint_path, device, dtype, auto_lambda=False):
 
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
 
-    print("Loading SD3 pipeline...")
-    pipeline = MyStableDiffusion3Pipeline.from_pretrained(
-        "stabilityai/stable-diffusion-3-medium-diffusers",
-        torch_dtype=dtype,
-        token=hf_token,
-    )
-    pipeline.to(device)
+    inference_cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "prompt_cache", "_inference_prompts.pt")
+    if os.path.exists(inference_cache):
+        print("Loading SD3 pipeline (no text encoders — using cached prompts)...")
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            torch_dtype=dtype, token=hf_token,
+            text_encoder=None, text_encoder_2=None, text_encoder_3=None,
+        )
+        pipeline.transformer.to(device)
+        pipeline.vae.to(device)
+    else:
+        print("Loading SD3 pipeline...")
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            "stabilityai/stable-diffusion-3-medium-diffusers",
+            torch_dtype=dtype, token=hf_token,
+        )
+        pipeline.to(device)
     pipeline.set_progress_bar_config(disable=True)
 
     if hasattr(pipeline, "enable_attention_slicing"):
@@ -389,7 +400,9 @@ def generate_image(pipeline, guidance_scale_model, prompt, lambda_val, seed, dev
     else:
         kwargs["prompt"] = prompt
 
-    return pipeline(**kwargs).images[0]
+    image = pipeline(**kwargs).images[0]
+    image._w_history = getattr(pipeline, '_last_w_history', [])
+    return image
 
 
 def generate_fsg(pipeline, guidance_scale_model, prompt, lambda_val, seed, device,
@@ -415,7 +428,9 @@ def generate_fsg(pipeline, guidance_scale_model, prompt, lambda_val, seed, devic
     else:
         kwargs["prompt"] = prompt
 
-    return pipeline(**kwargs).images[0]
+    image = pipeline(**kwargs).images[0]
+    image._w_history = getattr(pipeline, '_last_w_history', [])
+    return image
 
 
 def generate_baseline(pipeline, prompt, seed, device, guidance_scale,
@@ -529,19 +544,26 @@ def main():
 
     # Pre-encode all unique prompts once (avoids re-running T5-XXL per lambda)
     all_unique_prompts = list({p for prompts in PROMPTS_BY_FIGURE.values() for _, p in prompts})
-    print(f"Pre-encoding {len(all_unique_prompts)} unique prompts...")
-    prompt_embed_cache = {}
-    with torch.no_grad():
-        for i, p in enumerate(all_unique_prompts):
-            pe, npe, ppe, nppe = pipeline.encode_prompt(
-                prompt=p, prompt_2=None, prompt_3=None,
-                device=device, num_images_per_prompt=1, do_classifier_free_guidance=True)
-            prompt_embed_cache[p] = (pe.cpu(), npe.cpu(), ppe.cpu(), nppe.cpu())
-            if (i + 1) % 10 == 0:
-                print(f"  Encoded {i+1}/{len(all_unique_prompts)} prompts")
-    print(f"Prompt encoding done. Freeing T5 encoder...")
-    del pipeline.text_encoder_3
-    torch.cuda.empty_cache()
+    inference_cache = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "prompt_cache", "_inference_prompts.pt")
+    if os.path.exists(inference_cache):
+        print(f"Loading cached inference prompts from {inference_cache}...")
+        prompt_embed_cache = torch.load(inference_cache, map_location="cpu")
+        print(f"Loaded {len(prompt_embed_cache)} cached prompts.")
+    else:
+        print(f"Pre-encoding {len(all_unique_prompts)} unique prompts...")
+        prompt_embed_cache = {}
+        with torch.no_grad():
+            for i, p in enumerate(all_unique_prompts):
+                pe, npe, ppe, nppe = pipeline.encode_prompt(
+                    prompt=p, prompt_2=None, prompt_3=None,
+                    device=device, num_images_per_prompt=1, do_classifier_free_guidance=True)
+                prompt_embed_cache[p] = (pe.cpu(), npe.cpu(), ppe.cpu(), nppe.cpu())
+                if (i + 1) % 10 == 0:
+                    print(f"  Encoded {i+1}/{len(all_unique_prompts)} prompts")
+        print(f"Prompt encoding done. Freeing T5 encoder...")
+        del pipeline.text_encoder_3
+        torch.cuda.empty_cache()
 
     # Determine output root
     output_root = os.path.join(_REPO_ROOT, args.output_root, args.checkpoint_id)
@@ -626,6 +648,7 @@ def main():
                     "checkpoint": args.checkpoint,
                     "seconds": img_sec,
                     "timestamp": datetime.datetime.now().isoformat(),
+                    "w_history": getattr(image, '_w_history', []),
                 }
                 with open(meta_path, 'w') as f:
                     json.dump(meta, f, indent=2)
@@ -633,8 +656,10 @@ def main():
                 image_counter += 1
                 print(f"  prompt {prompt_id} λ={lam:.2f} | {img_sec:.1f}s | {image_counter}/{total_expected}", flush=True)
             except Exception as e:
-                print(f"  [R{rank}] ERROR prompt {prompt_id} λ={lam:.2f}: {e}")
-                image_counter += 1
+                print(f"  [R{rank}] ERROR prompt {prompt_id} λ={lam:.2f}: {e}", flush=True)
+                raise RuntimeError(
+                    f"Sampling failed for prompt {prompt_id} λ={lam:.2f}; aborting to avoid empty output directories."
+                ) from e
 
         elif task_type == "auto_lambda":
             al_dir = os.path.join(prompt_dir, "auto_lambda")
@@ -666,6 +691,7 @@ def main():
                     "checkpoint": args.checkpoint,
                     "seconds": al_sec,
                     "timestamp": datetime.datetime.now().isoformat(),
+                    "w_history": getattr(al_img, '_w_history', []),
                 }
                 with open(al_meta_path, 'w') as f:
                     json.dump(al_meta, f, indent=2)
@@ -673,8 +699,10 @@ def main():
                 image_counter += 1
                 print(f"  prompt {prompt_id} auto_lambda | {al_sec:.1f}s | {image_counter}/{total_expected}", flush=True)
             except Exception as e:
-                print(f"  [R{rank}] ERROR prompt {prompt_id} auto_lambda: {e}")
-                image_counter += 1
+                print(f"  [R{rank}] ERROR prompt {prompt_id} auto_lambda: {e}", flush=True)
+                raise RuntimeError(
+                    f"Sampling failed for prompt {prompt_id} auto_lambda; aborting to avoid empty output directories."
+                ) from e
 
         elif task_type in ("fsg", "fsg_auto_lambda"):
             is_fsg_auto = task_type == "fsg_auto_lambda"
@@ -712,6 +740,7 @@ def main():
                     "checkpoint": args.checkpoint,
                     "seconds": fsg_sec,
                     "timestamp": datetime.datetime.now().isoformat(),
+                    "w_history": getattr(fsg_img, '_w_history', []),
                 }
                 with open(fsg_meta_path, 'w') as f:
                     json.dump(fsg_meta, f, indent=2)
@@ -719,8 +748,10 @@ def main():
                 image_counter += 1
                 print(f"  prompt {prompt_id} {fsg_label} | {fsg_sec:.1f}s | {image_counter}/{total_expected}", flush=True)
             except Exception as e:
-                print(f"  [R{rank}] ERROR prompt {prompt_id} {fsg_label}: {e}")
-                image_counter += 1
+                print(f"  [R{rank}] ERROR prompt {prompt_id} {fsg_label}: {e}", flush=True)
+                raise RuntimeError(
+                    f"Sampling failed for prompt {prompt_id} {fsg_label}; aborting to avoid empty output directories."
+                ) from e
 
         else:  # baseline
             bl_dir_name, bl_label, bl_w, bl_cfgpp = task_info
@@ -757,8 +788,10 @@ def main():
                 image_counter += 1
                 print(f"  prompt {prompt_id} {bl_label} | {bl_sec:.1f}s | {image_counter}/{total_expected}", flush=True)
             except Exception as e:
-                print(f"  [R{rank}] ERROR prompt {prompt_id} {bl_label}: {e}")
-                image_counter += 1
+                print(f"  [R{rank}] ERROR prompt {prompt_id} {bl_label}: {e}", flush=True)
+                raise RuntimeError(
+                    f"Sampling failed for prompt {prompt_id} {bl_label}; aborting to avoid empty output directories."
+                ) from e
 
     # --- Barrier: wait for all ranks before summaries ---
     # Use a simple file-based barrier to avoid NCCL init issues (the process

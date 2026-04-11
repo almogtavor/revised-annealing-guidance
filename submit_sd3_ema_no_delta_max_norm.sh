@@ -9,7 +9,7 @@
 #SBATCH --output=logs/ddp/slurm_sd3_ema_no_delta_max_norm_%j.log
 #SBATCH --error=logs/ddp/slurm_sd3_ema_no_delta_max_norm_%j.log
 #SBATCH --partition=killable
-#SBATCH --nodelist=n-801,n-802,n-804,n-805,n-601,n-602
+#SBATCH --nodelist=n-601,n-602,n-801,n-802,n-803,n-804,n-805,n-806,rack-bgw-dgx1,rack-gww-dgx1,rack-omerl-g01
 
 set -euo pipefail
 

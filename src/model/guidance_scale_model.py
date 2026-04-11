@@ -26,7 +26,7 @@ class ScalarMLP(nn.Module):
         # Normalizations applied before embedding
         t_embed_normalization: float = 1e3,  # SD3 timesteps are [0, 1000], so t/1000 → [0, 1]
         delta_embed_normalization: float = 5.0,
-        # Number of denoising steps (T); timestep input is normalized as t/T
+        # Number of denoising steps (T)
         num_timesteps: int = None,
         # Final affine on head output
         w_bias: float = 1.0,
@@ -97,7 +97,7 @@ class ScalarMLP(nn.Module):
             l:        scalar or (B,)
             noise_pred_uncond: (B, C, H, W)
             noise_pred_text:   (B, C, H, W)
-            interval: (t-s)/T normalized interval length, scalar or (B,).
+            interval: (t-s)/1000 normalized interval length, scalar or (B,).
                       Only used when interval_embed_dim > 0; ignored otherwise.
             c_emb:    (B, c_input_dim) pooled prompt embeddings.
                       Only used when c_embed_dim > 0; ignored otherwise.

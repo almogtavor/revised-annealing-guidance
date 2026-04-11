@@ -40,6 +40,7 @@ training:
   accumulation_steps: 16
   out_dir: ./output
   image_root: src/data/laion/laion_pop_images/
+  prompt_cache_dir: /home/ML_courses/03683533_2025/or_tal_almog/almog/prompt_cache/
   ema_loss_normalization: true
   optimizer_kwargs:
     weight_decay: 0.01

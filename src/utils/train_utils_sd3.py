@@ -41,19 +41,34 @@ def load_models(config, device):
     from src.model.guidance_scale_model import ScalarMLP
 
     hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
-    dtype = torch.float32
+    fp16 = config.get('fp16', False)
+    dtype = torch.float16 if fp16 else torch.float32
 
-    pipeline = MyStableDiffusion3Pipeline.from_pretrained(
-        config['diffusion']['model_id'], torch_dtype=dtype, token=hf_token)
-    pipeline.to(device)
+    cache_dir = config.get('training', {}).get('prompt_cache_dir')
+    use_cache = cache_dir and os.path.isdir(cache_dir)
+
+    if use_cache:
+        # Skip text encoders entirely — load only transformer + VAE
+        # This allows training on smaller GPUs (e.g. 12GB TITAN Xp)
+        print(f"Prompt cache found at {cache_dir}; loading without text encoders.", flush=True)
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            config['diffusion']['model_id'], torch_dtype=dtype, token=hf_token,
+            text_encoder=None, text_encoder_2=None, text_encoder_3=None)
+        pipeline.transformer.to(device)
+        pipeline.vae.to(device)
+    else:
+        pipeline = MyStableDiffusion3Pipeline.from_pretrained(
+            config['diffusion']['model_id'], torch_dtype=dtype, token=hf_token)
+        pipeline.to(device)
+        for enc in [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]:
+            if enc is not None:
+                enc.requires_grad_(False)
+
     if hasattr(pipeline, "enable_attention_slicing"):
         pipeline.enable_attention_slicing()
 
     pipeline.transformer.requires_grad_(False)
     pipeline.vae.requires_grad_(False)
-    for enc in [pipeline.text_encoder, pipeline.text_encoder_2, pipeline.text_encoder_3]:
-        if enc is not None:
-            enc.requires_grad_(False)
     if hasattr(pipeline.transformer, 'enable_gradient_checkpointing'):
         pipeline.transformer.enable_gradient_checkpointing()
 
@@ -73,6 +88,43 @@ def encode_prompt_sd3(pipeline, prompt):
         device=device, num_images_per_prompt=1, do_classifier_free_guidance=True)
     prompt_embeds = torch.cat([npe, pe], dim=0).to(device=device, dtype=dtype)
     pooled = torch.cat([nppe, ppe], dim=0).to(device=device, dtype=dtype)
+    return prompt_embeds, pooled
+
+
+_neg_cache = {}  # module-level cache for negative embeddings
+
+
+def load_cached_prompt_sd3(cache_dir, image_root, image_paths, device):
+    """Load pre-cached prompt embeddings from disk.
+
+    Returns (prompt_embeds, pooled) in the same format as encode_prompt_sd3:
+      prompt_embeds: [neg; pos] concatenated along batch dim
+      pooled: [neg_pooled; pos_pooled] concatenated along batch dim
+    """
+    dtype = torch.float32
+    B = len(image_paths)
+
+    # Load shared negative embeddings (cached once)
+    if cache_dir not in _neg_cache:
+        neg = torch.load(os.path.join(cache_dir, "_negative.pt"), map_location="cpu")
+        _neg_cache[cache_dir] = neg
+    neg = _neg_cache[cache_dir]
+    npe = neg["negative_prompt_embeds"].unsqueeze(0).expand(B, -1, -1).to(device=device, dtype=dtype)
+    nppe = neg["negative_pooled_prompt_embeds"].unsqueeze(0).expand(B, -1).to(device=device, dtype=dtype)
+
+    # Load per-prompt positive embeddings
+    pe_list, ppe_list = [], []
+    for img_path in image_paths:
+        rel = os.path.relpath(img_path, image_root)
+        cache_path = os.path.join(cache_dir, rel.replace(".jpg", ".pt"))
+        cached = torch.load(cache_path, map_location="cpu")
+        pe_list.append(cached["prompt_embeds"])
+        ppe_list.append(cached["pooled_prompt_embeds"])
+    pe = torch.stack(pe_list).to(device=device, dtype=dtype)
+    ppe = torch.stack(ppe_list).to(device=device, dtype=dtype)
+
+    prompt_embeds = torch.cat([npe, pe], dim=0)
+    pooled = torch.cat([nppe, ppe], dim=0)
     return prompt_embeds, pooled
 
 

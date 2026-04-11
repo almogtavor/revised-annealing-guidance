@@ -18,7 +18,7 @@ def get_data_loader(config):
     # Dataset parameters
     batch_size = config["training"]["batch_size"]
     image_root = config["training"]["image_root"]
-    dataset = LaionDataset(image_root)
+    dataset = LaionDataset(image_root, prompt_cache_dir=config["training"].get("prompt_cache_dir"))
 
     # Create DataLoader for training
     dataloader = DataLoader(
