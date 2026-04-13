@@ -64,6 +64,10 @@ def train(config, pipeline, model, optimizer, dataloader, forward_fn=None, resum
 
             completed_step = global_step + 1
 
+            # Update FSG global image counter for delayed FSG start
+            import src.utils.fsg_utils as _fsg_mod
+            _fsg_mod._fsg_global_images = completed_step * global_batch_size
+
             result = forward_fn(config, pipeline, model, images, prompts, image_paths=image_paths)
             if isinstance(result, dict):
                 loss = result['loss']
@@ -262,7 +266,7 @@ def forward_pass_sd3(
     del pred
 
     w = model(timestep.float(), l, vu, vt)
-    v_guided = vu + w * (vt - vu)
+    v_guided = vu + w.view(-1, 1, 1, 1) * (vt - vu)
 
     use_vanilla_cfg = bool(config['diffusion'].get('vanilla_cfg', 0))
     # Match the original repo: step on the scheduler's discrete timestep grid.

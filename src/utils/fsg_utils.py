@@ -118,7 +118,7 @@ def fsg_inner_loop(pipeline, model, z_t, t_val, s_val, sigma_t, sigma_s,
 
         # (2) Predict w with interval and prompt awareness
         w = model(t_tensor.float(), lam, vu, vt, interval=interval_norm, c_emb=c_emb)
-        v_guided = vu + w * (vt - vu)
+        v_guided = vu + w.view(-1, 1, 1, 1) * (vt - vu)
 
         # (3) Guided forward step: z_t → z_s
         z_t_f32 = z_t.float()
@@ -147,6 +147,9 @@ def fsg_inner_loop(pipeline, model, z_t, t_val, s_val, sigma_t, sigma_s,
     return z_t
 
 
+_fsg_global_images = 0  # updated by train loop
+
+
 def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None):
     """FSG-aligned SD3 forward pass.
 
@@ -154,12 +157,14 @@ def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None)
     50% chance: FSG-aligned training
       - if t is in FSG region [0, 0.375T]: snap to nearest site, run FSG block
       - otherwise: regular one-step training
+    Supports fsg.start_after_images: skip FSG branch until enough images seen.
     """
     B = images.size(0)
     dtype = pipeline.transformer.dtype
     T = train_utils_sd3.get_num_sampling_steps(config, default=20)
     fsg_cfg = config.get('fsg', {})
     sc_weight = fsg_cfg.get('sc_weight', FSG_SC_WEIGHT)
+    fsg_active = _fsg_global_images >= fsg_cfg.get('start_after_images', 0)
 
     lam = torch.rand(B).to(pipeline.device)
     fixed_lam = config['training'].get('fixed_lambda')
@@ -183,8 +188,8 @@ def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None)
     # Extract conditional pooled prompt embeddings for MLP (second half of doubled ppe)
     c_emb = ppe[ppe.shape[0] // 2:].float()  # (B, 2048)
 
-    # Decide mode: 50% FSG-aligned, 50% regular
-    use_fsg_mode = torch.rand(1).item() < 0.5
+    # Decide mode: 50% FSG-aligned, 50% regular (only if FSG is active)
+    use_fsg_mode = fsg_active and torch.rand(1).item() < 0.5
 
     # Check if timestep falls in the early high-noise FSG region [0.625 * 1000, 1000]
     t_val = timestep.float().mean().item()
@@ -232,7 +237,7 @@ def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None)
         interval = (t_snapped.float() - t_next_val.float()) / 1000.0  # (t - s) / t_embed_normalization
 
         w_final = model(t_snapped.float(), lam, vu_final, vt_final, interval=interval, c_emb=c_emb)
-        v_guided = vu_final + w_final * (vt_final - vu_final)
+        v_guided = vu_final + w_final.view(-1, 1, 1, 1) * (vt_final - vu_final)
 
         # CFG++ step from snapped site
         st_, st1_ = st.view(-1, 1, 1, 1), st1.view(-1, 1, 1, 1)
@@ -255,7 +260,7 @@ def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None)
 
         # Self-consistency on the final FSG iterate: match guided and noised site marginals.
         sc_loss = _energy_mmd(z_t_refined, noisy_latents_snapped)
-        loss = loss + sc_weight * sc_loss
+        # loss = loss + sc_weight * sc_loss  # disabled: SC not included in loss
 
         eps_val = ((1 - lam) * ((v_guided - velocity_gt_snapped.float()) ** 2).mean(dim=[1, 2, 3])).mean()
         diff_val = (lam * (delta ** 2).mean(dim=[1, 2, 3])).mean()
@@ -291,7 +296,7 @@ def forward_pass_fsg(config, pipeline, model, images, prompts, image_paths=None)
         interval = (timestep.float() - t_next.float()) / 1000.0  # (t - s) / t_embed_normalization
 
         w = model(timestep.float(), lam, vu, vt, interval=interval, c_emb=c_emb)
-        v_guided = vu + w * (vt - vu)
+        v_guided = vu + w.view(-1, 1, 1, 1) * (vt - vu)
 
         st_, st1_ = st.view(-1, 1, 1, 1), st1.view(-1, 1, 1, 1)
         zf = noisy_latents.float()

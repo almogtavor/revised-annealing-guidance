@@ -23,21 +23,22 @@ guidance_scale_model:
   interval_embed_dim: 4
   c_embed_dim: 4
   c_input_dim: 2048
-  delta_embed_normalization: 1.0
+  delta_embed_normalization: 5.0
   t_embed_normalization: 1000
   w_scale: 1
   w_bias: 1
 
 fsg:
   enabled: true
-  sc_weight: 0.1
+  sc_weight: 0.01
+  start_after_images: 10000
 
 training:
-  label: fsg_steps20
+  label: fsg_steps20_delayed
   save_interval: 200
   max_images: 20000
-  batch_size: 1
-  accumulation_steps: 16
+  batch_size: 4
+  accumulation_steps: 1
   out_dir: ./output
   image_root: src/data/laion/laion_pop_images/
   prompt_cache_dir: /home/ML_courses/03683533_2025/or_tal_almog/almog/prompt_cache/

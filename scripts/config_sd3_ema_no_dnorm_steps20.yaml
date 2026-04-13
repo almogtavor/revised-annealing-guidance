@@ -21,7 +21,7 @@ guidance_scale_model:
   delta_embed_dim: 4
   t_embed_dim: 4
   t_embed_normalization: 1000
-  delta_embed_normalization: 1.0
+  delta_embed_normalization: 5.0
   w_scale: 1
   w_bias: 1
 
@@ -29,8 +29,8 @@ training:
   label: ema_no_dnorm_steps20
   save_interval: 200
   max_images: 20000
-  batch_size: 1
-  accumulation_steps: 16
+  batch_size: 4
+  accumulation_steps: 1
   out_dir: ./output
   image_root: src/data/laion/laion_pop_images/
   prompt_cache_dir: /home/ML_courses/03683533_2025/or_tal_almog/almog/prompt_cache/
